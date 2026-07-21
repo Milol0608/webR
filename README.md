@@ -57,6 +57,14 @@ async def planner(task: str) -> str:
 That is the entire integration. No context objects threaded through signatures, no changes
 to call sites, no configuration required.
 
+### Documentation
+
+| | |
+|---|---|
+| [Diagnosing with webR](docs/USING.md) | A playbook organised by symptom: *my agent returned something wrong, now what* |
+| [How webR works](docs/INTERNALS.md) | The mechanisms, module by module, and why each decision went the way it did |
+| [`examples/`](examples/) | Four runnable examples, no API key required |
+
 ---
 
 ## Quickstart
@@ -346,6 +354,9 @@ Stated plainly, because a debugging tool that overstates itself is worse than no
 ---
 
 ## Design
+
+[How webR works](docs/INTERNALS.md) walks the whole system: the life of a single traced
+call, the five mechanisms worth understanding, and a module map.
 
 Decisions and their rationale are recorded as ADRs, including the ones that turned out to
 be wrong:
