@@ -21,12 +21,19 @@ def buffer() -> TraceBuffer:
     """
     original = webr.get_buffer()
     fresh = webr.configure(capacity=1_000, pinned_capacity=100)
-    webr.enable()
+    _reset_process_state()
     try:
         yield fresh
     finally:
         webr.set_buffer(original)
-        webr.enable()
+        _reset_process_state()
+
+
+def _reset_process_state() -> None:
+    webr.enable()
+    webr.set_capture(True, full=False)
+    webr.set_detectors(*webr.DEFAULT_DETECTORS)
+    webr.set_suspect_signals(*webr.DEFAULT_SUSPECT_SIGNALS)
 
 
 def by_name(buffer: TraceBuffer, name: str) -> NodeRecord:
