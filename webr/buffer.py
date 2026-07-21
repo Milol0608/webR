@@ -46,8 +46,18 @@ class TraceBuffer:
     no implicit protection.
     """
 
-    __slots__ = ("_capacity", "_pinned_capacity", "_lock", "_ring", "_resident",
-                 "_pinned", "_pinned_order", "_pin_requests", "_dropped", "_pins_dropped")
+    __slots__ = (
+        "_capacity",
+        "_dropped",
+        "_lock",
+        "_pin_requests",
+        "_pinned",
+        "_pinned_capacity",
+        "_pinned_order",
+        "_pins_dropped",
+        "_resident",
+        "_ring",
+    )
 
     def __init__(
         self,

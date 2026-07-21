@@ -135,8 +135,10 @@ def test_internal_indexes_do_not_grow_without_bound():
     for i in range(5_000):
         buf.append(make_record(f"n{i}"))
 
-    assert len(buf._resident) <= 10  # noqa: SLF001 - deliberate white-box assertion
-    assert len(buf._pinned) == 0  # noqa: SLF001
+    # Deliberate white-box assertions: the ceiling this class promises is only real if
+    # the internal indexes shrink with the ring, and that is not observable from outside.
+    assert len(buf._resident) <= 10
+    assert len(buf._pinned) == 0
 
 
 def test_clear_resets_counters():
