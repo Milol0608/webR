@@ -48,6 +48,26 @@ print(webrtrace.render(webrtrace.export_graph()))
 If the tree looks flat when you expected nesting, your agents are not calling each other
 the way you think they are — which is itself a useful discovery.
 
+**If the tree is too big to read**, collapse it. A run where an orchestrator calls an agent
+forty times is forty nodes, which is the right thing to store and the wrong thing to look
+at:
+
+```python
+print(webrtrace.render(webrtrace.collapse_by_agent(webrtrace.export_graph())))
+```
+```
+collapsed from 17 invocations | 3 nodes | 2 edges | 1 trace(s) | 2 ok | 1 error
+
+[ ok] * orchestrator                       872.4us  (max 872.4us)
+`- [ERR]   worker x8                          171.2us  (1 err, max 63.0us)
+   `- [ ok]   llm_call x8                          5.1us  (max 1.5us)
+```
+
+The worst status always wins, so one failure among forty successes still reads as `[ERR]`.
+From the CLI: `python -m webrtrace traces/ --collapse`. Each collapsed node keeps the
+original `node_ids`, so you can drop back to the raw document to see which invocation it
+was.
+
 ---
 
 ## My agent returned something wrong

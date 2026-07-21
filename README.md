@@ -365,6 +365,10 @@ Environment: `WEBR_ENABLED`, `WEBR_CAPTURE`, `WEBR_CAPTURE_FULL`.
 |---|---|
 | `export_graph(buffer=None)` | Graph document from memory |
 | `graph_from_jsonl(path)` | Graph document from a file or a directory |
+| `collapse_by_agent(document)` | Aggregate repeated invocations into one node per agent |
+| `render(document)` / `render_failures(document)` | Terminal output; the second is just the chains that broke |
+| `inject()` / `remote_parent(carrier)` | Carry a trace across a process or machine boundary |
+| `set_redactor(fn)` / `common_secrets` | Scrub payloads before they are recorded |
 | `write_graph(path, buffer=None)` | Write the document as JSON |
 | `load_jsonl(path)` | Raw records; malformed final lines are skipped, not fatal |
 

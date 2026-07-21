@@ -220,6 +220,8 @@ In dependency order — each depends only on those above it.
 | `decorator.py` | `@webR_node` | Shape dispatch at decoration time; four wrappers |
 | `links.py` | `SENDS` edges | Bounded identity registry with strong references |
 | `graph.py` | Graph documents | Reports its own gaps: `dropped`, `dangling_edges` |
+| `redaction.py` | Scrubbing payloads | Fails closed — a redactor that raises drops the payload rather than recording it |
+| `collapse.py` | Per-agent aggregate view | A *view*, not a trace: ids are synthetic and durations are sums. The worst status always wins |
 | `render.py` | Terminal output | ASCII only, on purpose |
 | `__main__.py` | `python -m webrtrace` | Reads a file or a directory |
 

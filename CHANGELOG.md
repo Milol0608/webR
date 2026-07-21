@@ -36,7 +36,10 @@ First public release.
   halves into one web. Taint does not cross the boundary, and clock skew makes
   cross-process timestamp ordering unreliable; both are documented.
 - **Terminal renderer and CLI** — `render()` and `python -m webrtrace <file-or-dir>`,
-  including `--failures` for just the chains that broke.
+  including `--failures` for just the chains that broke and `--collapse` for the aggregate.
+- **Per-agent aggregate view** — `collapse_by_agent()` folds repeated invocations into one
+  node per agent with call counts, summed and worst-case durations, and a status rollup in
+  which the worst outcome wins, so a single failure among forty successes is never hidden.
 
 ### Fixed before release
 
