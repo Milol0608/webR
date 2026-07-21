@@ -28,7 +28,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from .records import NodeRecord
+from .records import EdgeRecord, NodeRecord
 
 #: Wake the writer once this many records are pending, rather than waiting for the timer.
 BATCH_WAKE_THRESHOLD = 256
@@ -38,7 +38,7 @@ DEFAULT_QUEUE_CAPACITY = 10_000
 DEFAULT_ROTATE_BYTES = 64 * 1024 * 1024
 
 
-def _encode(record: NodeRecord) -> str:
+def _encode(record: NodeRecord | EdgeRecord) -> str:
     # `default=str` is a deliberate backstop: user-supplied attributes may hold objects
     # json knows nothing about, and a tracing library must never raise inside its own
     # writer because someone attached a datetime to a node.
@@ -62,7 +62,7 @@ class JsonlWriter:
         self._rotate_bytes = rotate_bytes
 
         self._lock = threading.Lock()
-        self._pending: deque[NodeRecord] = deque()
+        self._pending: deque[NodeRecord | EdgeRecord] = deque()
         self._wake = threading.Event()
         self._stopping = False
         self._dropped = 0
@@ -81,8 +81,8 @@ class JsonlWriter:
         self._thread.start()
         atexit.register(self.stop)
 
-    def submit(self, record: NodeRecord) -> None:
-        """Queue a completed node. O(1), no I/O, never blocks."""
+    def submit(self, record: NodeRecord | EdgeRecord) -> None:
+        """Queue a completed node or a declared edge. O(1), no I/O, never blocks."""
         with self._lock:
             if len(self._pending) >= self._capacity:
                 # Drop-oldest and count it. Silently claiming a complete trace would be
@@ -141,7 +141,7 @@ class JsonlWriter:
             if not self._pending:
                 return
             batch = self._pending
-            self._pending = deque()
+            self._pending = deque()  # type: ignore[assignment]
             closed = self._file.closed
 
         if closed:

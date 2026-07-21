@@ -20,7 +20,7 @@ from typing import Any
 
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector
-from .records import NodeRecord
+from .records import EdgeRecord, NodeRecord
 from .writer import JsonlWriter
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -90,6 +90,14 @@ def emit(record: NodeRecord) -> None:
     writer = _writer
     if writer is not None:
         writer.submit(record)
+
+
+def emit_edge(edge: EdgeRecord) -> None:
+    """Hand a declared edge to every sink, on the same path completed nodes take."""
+    _buffer.append_edge(edge)
+    writer = _writer
+    if writer is not None:
+        writer.submit(edge)
 
 
 def is_enabled() -> bool:
