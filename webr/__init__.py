@@ -17,6 +17,8 @@ from __future__ import annotations
 from ._ids import new_node_id, new_trace_id
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .decorator import submit, webR_node
+from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector, Payloads
+from .fingerprint import fingerprint
 from .graph import (
     SCHEMA_VERSION,
     export_graph,
@@ -43,6 +45,9 @@ from .runtime import (
     is_enabled,
     reset,
     set_buffer,
+    set_capture,
+    set_detectors,
+    set_suspect_signals,
     start_writer,
     stop_writer,
 )
@@ -52,9 +57,12 @@ __version__ = "0.0.1"
 
 __all__ = [
     "DEFAULT_CAPACITY",
+    "DEFAULT_DETECTORS",
     "DEFAULT_PINNED_CAPACITY",
+    "DEFAULT_SUSPECT_SIGNALS",
     "SCHEMA_VERSION",
     "ContextVarPropagator",
+    "Detector",
     "EdgeKind",
     "EdgeRecord",
     "ErrorInfo",
@@ -62,6 +70,7 @@ __all__ = [
     "NodeRecord",
     "NodeRef",
     "NodeStatus",
+    "Payloads",
     "Propagator",
     "TraceBuffer",
     "__version__",
@@ -69,6 +78,7 @@ __all__ = [
     "disable",
     "enable",
     "export_graph",
+    "fingerprint",
     "flush",
     "get_buffer",
     "get_propagator",
@@ -81,7 +91,10 @@ __all__ = [
     "new_trace_id",
     "reset",
     "set_buffer",
+    "set_capture",
+    "set_detectors",
     "set_propagator",
+    "set_suspect_signals",
     "start_writer",
     "stop_writer",
     "submit",
