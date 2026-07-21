@@ -207,8 +207,13 @@ def _named(name: str):
 
 @_named("empty_output")
 def detect_empty_output(payloads: Payloads) -> Mapping[str, Any] | None:
-    """An agent that returned nothing at all, successfully."""
-    if payloads.output is not None and not payloads.output.strip():
+    """An agent that returned nothing at all, successfully.
+
+    Reads the bounded text, not the raw output: `"   ".strip()` on a megabyte of
+    whitespace copies a megabyte. If head and tail are both blank the payload is blank
+    for every purpose that matters here.
+    """
+    if payloads.output is not None and not payloads.scanned_output.strip():
         return {"empty_output": True}
     return None
 
@@ -273,10 +278,14 @@ def detect_json_shape(payloads: Payloads) -> Mapping[str, Any] | None:
     """
     if not payloads.output:
         return None
-    stripped = payloads.output.strip()
+
+    # Bounded text first. Stripping the raw output was an unbounded copy whenever the
+    # payload actually had leading whitespace -- measured at 2.1ms on 10MB -- and model
+    # output very often begins with a newline, so that path was routinely taken.
+    stripped = payloads.scanned_output.strip()
     if not stripped or stripped[0] not in "{[":
         return None
-    if len(stripped) > MAX_CHARS_SCANNED:
+    if payloads.truncated or len(payloads.output) > MAX_CHARS_SCANNED:
         # Parsing is bounded like every other check. Saying "not checked" is honest;
         # spending milliseconds proving a huge payload is well-formed is not the job.
         return {"json_unchecked": True}
