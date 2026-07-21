@@ -223,6 +223,13 @@ A validator **never raises and never changes the return value**. It marks the no
 `[SUS]` and records the reason. A hallucination is a call that succeeded, so treating it as
 an exception would be modelling it wrongly.
 
+**Return `True` to pass — nothing else counts as passing.** `False`, `None`, `0`, and `""`
+all mark the node suspect. In particular a validator that falls off the end without a
+`return` returns `None` and flags every node. That is deliberate: a validator you *thought*
+was checking something and which silently passes everything is the exact failure this tool
+exists to catch, so the safe default is to fail loudly. If you want a check that abstains,
+return `True`.
+
 To make a normally-informational signal damning in your pipeline:
 
 ```python
@@ -232,6 +239,12 @@ webrtrace.set_suspect_signals("refusal", "empty_output", "json_invalid", "novel_
 `novel_numbers` is off that list by default because a node that computes a total is
 *supposed* to produce a figure nobody passed in. Turn it on for nodes that should only ever
 be summarising — and expect false positives if you turn it on globally.
+
+**One more caveat on `novel_numbers`.** Inputs are joined and then sampled head-and-tail to
+bound scan cost, so on a large input the middle is not read. A figure that appears only in
+that unread middle will look fabricated when it is not. The node's signals carry
+`detection_truncated` whenever this sampling happened — treat `novel_numbers` as
+indicative rather than authoritative on those nodes.
 
 ---
 
@@ -250,11 +263,21 @@ print(web["stats"])
 | `dangling_edges` > 0 | An edge points at a node that was evicted or lives in another rotated file | Read the whole directory: `graph_from_jsonl("traces/")` |
 | A node appears as a root when it should have a parent | Same as above, or the parent was never decorated | Check the gap in the tree |
 | `write_errors` > 0 in `get_writer().stats()` | The disk write failed | Tracing continued in memory; disk records after that point are lost |
+| `pins_dropped` > 0 | More than `pinned_capacity` failures occurred; the oldest were evicted | Raise `pinned_capacity`, or stream to disk |
+| `detection_truncated` on a node | The payload exceeded the detector scan window and was sampled head-and-tail | Treat that node's signals as indicative, not authoritative — see the note on `novel_numbers` below |
 | Many separate `traces` when you expected one | Work crossed a boundary the context could not | Use `webrtrace.submit()` for `ThreadPoolExecutor`, or a `SENDS` token |
 
-Errors, suspects, tainted nodes, **and their ancestor chains** are never evicted by age. If
-`dropped` is large but your failure chain is intact, the trace is still trustworthy for
-diagnosis — you have lost uneventful successes, which is the point.
+Errors, suspects, tainted nodes, **and their ancestor chains** are protected from *age*
+eviction — a failure at minute two survives an hour of subsequent successes. They are not
+protected unconditionally: the pinned store has its own ceiling (`pinned_capacity`,
+default 10,000) and drops the oldest pinned record when it fills, counting each one in
+`pins_dropped`. A run that fails in a loop will eventually evict its earliest failures,
+because otherwise a pathological run would defeat the memory ceiling entirely.
+
+So: if `dropped` is large, `pins_dropped` is zero, and your failure chain is intact, the
+trace is trustworthy for diagnosis — you have lost uneventful successes, which is the
+point. If `pins_dropped` is non-zero, raise `pinned_capacity` or stream to disk, because
+you are now losing failures too.
 
 ---
 

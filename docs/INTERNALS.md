@@ -17,8 +17,10 @@ was made — including where the alternatives would have been reasonable.
 ## The whole thing in one paragraph
 
 A `ContextVar` holds a reference to the node currently executing. When a decorated function
-is called, it reads that variable to learn who its parent is, puts itself there for the
-duration of the call, and restores the previous value on the way out. When the call
+is called, it reads that variable to learn who its parent is, puts itself there while the
+function runs, and restores the previous value on the way out. (Generators are the
+exception: they attach and detach around each individual resumption, because a generator's
+body runs in slices and the context must not be held between them.) When the call
 finishes, it builds one immutable record — timings, status, a fingerprint of the payloads,
 any signals the detectors produced — and appends that record to a bounded in-memory buffer
 and, optionally, to a queue drained by a background thread that writes JSONL. Everything
@@ -55,6 +57,14 @@ misclassifies them.
 1. **`if not runtime.enabled: return func(...)`** — one module-attribute load and a branch.
    This is why tracing can be switched on inside a live process; the alternative (returning
    the undecorated function at import time) would be free but frozen at import.
+
+   Two wrappers cannot be quite that cheap. The sync-generator wrapper exits via
+   `return (yield from func(...))`, which is still one branch but delegates through the
+   generator protocol. The **async-generator wrapper has no early exit at all**: Python has
+   no `async yield from`, so the delegation loop is written out by hand and runs even when
+   tracing is disabled, driving `asend` per item while skipping the context and the record.
+   Disabled tracing is therefore materially cheaper for sync and async functions than for
+   async generators.
 
 2. **Collect inputs.** String-valued arguments are matched to parameter names by zipping
    `spec.param_names` against `args` and reading `kwargs` directly. Only `str` and `bytes`
@@ -202,8 +212,8 @@ In dependency order — each depends only on those above it.
 | `_ids.py` | Trace and node ids | 128/64-bit, W3C Trace Context widths, so a future distributed propagator needs no second scheme. Reseeds after `fork` |
 | `records.py` | `NodeRecord`, `EdgeRecord`, enums | Frozen, slotted, JSON-ready. `is_interesting` is what drives retention |
 | `fingerprint.py` | Bounded payload summaries | The **hash** is the useful part: same hash means the content passed through untouched |
-| `propagation.py` | `NodeRef`, `NodeState`, `Propagator` | The `Propagator` protocol is the seam where cross-process support will plug in |
-| `detectors.py` | Eight lexical signals | Every limit applies to the text *before* the scan, not to the results |
+| `propagation.py` | `NodeRef`, `NodeState`, `Propagator` | The decorator never touches `contextvars` directly — it goes through `Propagator`, which is what makes propagation replaceable |
+| `detectors.py` | Eight lexical signals | Limits apply to the text *before* the scan, not to the results — read via `scanned_output`/`scanned_input`, never the raw payload |
 | `buffer.py` | Bounded retention | Ring + pinned, both capped |
 | `writer.py` | JSONL on a daemon thread | Daemon + `atexit`, and it survives write failures rather than dying |
 | `runtime.py` | Process-wide state, `emit()` | One place where a record fans out to every sink |
@@ -251,6 +261,18 @@ Things that will bite whoever touches this next.
   error-handling code, keep it wrapped, or webR will start changing program behaviour.
 - **`stats()["dropped"]` covers two causes**: queue overflow and lost write batches.
   `write_errors` isolates the second.
+- **Pinned records are not immortal.** The pinned store has its own ceiling and evicts the
+  oldest when full, counting them in `pins_dropped`. "Never evicted by age" means exactly
+  that and nothing more.
+- **Generator wrappers must stay full delegating generators.** `send`, `throw`, `close`,
+  and `StopIteration.value` all have to pass through. An earlier version caught thrown
+  exceptions and closed the inner generator instead of throwing into it, which broke
+  recovery in any generator that handles exceptions — tracing silently changing behaviour.
+  If you touch `_wrap_generator`, run `tests/test_review_findings.py`.
+- **Detectors must read `scanned_output` / `scanned_input`, never `payloads.output`
+  directly.** Two of them once called `.strip()` on the raw payload. CPython makes that
+  free when nothing is stripped and an O(n) copy when something is — 2.1ms on 10MB — and
+  model output routinely begins with a newline, so the expensive path was the common one.
 
 ---
 
@@ -260,7 +282,9 @@ Things that will bite whoever touches this next.
 
 ```python
 def detect_sql(payloads):
-    if payloads.output and "DROP TABLE" in payloads.output.upper():
+    # `lower_output` is the bounded, already-lowercased text. Reading `payloads.output`
+    # here instead would scan the entire payload -- unbounded work on every call.
+    if "drop table" in payloads.lower_output:
         return {"dangerous_sql": True}
 
 detect_sql.name = "dangerous_sql"
@@ -268,14 +292,25 @@ webrtrace.set_detectors(*webrtrace.DEFAULT_DETECTORS, detect_sql)
 webrtrace.set_suspect_signals("dangerous_sql", "refusal", "empty_output")
 ```
 
-It must be cheap, must not do I/O, and should use the cached properties on `Payloads`
-(`output_words`, `input_numbers`, …) rather than re-tokenizing. A detector that raises is
-contained and reported as `detector_errors` — but do not rely on that.
+It must be cheap, must not do I/O, and must read through the cached, bounded properties on
+`Payloads` (`lower_output`, `scanned_output`, `output_words`, `input_numbers`, …) rather
+than touching `payloads.output` or re-tokenizing. A detector that raises is contained and
+reported as `detector_errors` — but do not rely on that.
 
 **A new sink** — add it to `runtime.emit()`. That function is the single fan-out point, which
 is why an OpenTelemetry bridge would be a two-line change.
 
-**Cross-process propagation** (the main v0.2 item) — implement the `Propagator` protocol with
-`inject()`/`extract()` returning a serializable dict, and add a merge step that stitches
-several partial webs into one. The seam exists precisely so this does not require touching
-the decorator.
+**Cross-process propagation** (the main v0.2 item). Be clear about what exists today: the
+`Propagator` protocol has exactly three methods — `current()`, `attach()`, `detach()` — and
+nothing in the library calls `inject()` or `extract()`. **The protocol will have to be
+extended, not merely implemented.** What the indirection buys is that the decorator asks a
+`Propagator` rather than reading a `ContextVar`, so the change is confined to
+`propagation.py` and whatever calls the new methods at boundaries; the four wrappers do not
+move.
+
+The work is roughly: add `inject() -> dict` / `extract(dict)` to the protocol and the
+default implementation, emit a W3C-style `traceparent` (the id widths in `_ids.py` already
+match), and build a merge step that stitches partial webs from several processes into one
+document — including deciding what to do about clock skew and traces whose root is in a
+process that died. That last part is the real work, and it is a distributed-systems
+problem rather than a decorator problem.
