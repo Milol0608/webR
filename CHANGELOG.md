@@ -26,6 +26,17 @@ First public release.
   a problem, even ancestors that have not finished yet.
 - **Explicit `SENDS` edges** — `mark()`/`link()` for in-process data dependencies and
   serializable `origin()` tokens for hand-offs across threads, queues, or machines.
+- **Redaction** — `set_redactor()` and a per-node `redact=`, applied before payloads are
+  hashed, inspected, or stored. Fails closed: a redactor that raises causes the payload to
+  be dropped rather than recorded. Ships `common_secrets` as a floor for API keys, tokens,
+  emails, and card-length digit runs.
+- **Cross-process propagation** — `inject()` emits a W3C Trace Context `traceparent`;
+  `remote_parent()` adopts it, so work in another process joins the caller's trace with a
+  real parent/child edge. Exporting a directory of per-process JSONL files stitches the
+  halves into one web. Taint does not cross the boundary, and clock skew makes
+  cross-process timestamp ordering unreliable; both are documented.
+- **Terminal renderer and CLI** — `render()` and `python -m webrtrace <file-or-dir>`,
+  including `--failures` for just the chains that broke.
 
 ### Fixed before release
 

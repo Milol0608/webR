@@ -269,6 +269,12 @@ Things that will bite whoever touches this next.
   exceptions and closed the inner generator instead of throwing into it, which broke
   recovery in any generator that handles exceptions — tracing silently changing behaviour.
   If you touch `_wrap_generator`, run `tests/test_review_findings.py`.
+- **Taint does not cross a process boundary.** It rides on `NodeState`, a mutable object
+  reachable through the live `NodeRef` chain, and mutable state cannot traverse a process.
+  A child process's failure marks its local ancestors; the caller in the parent process
+  stays unmarked. The `[ERR]` node still appears in the joined web and the failure chain
+  still crosses the boundary — only the `*` stops at the edge. Propagating it would mean
+  a return channel from child to parent, which webR does not have and should not grow.
 - **Detectors must read `scanned_output` / `scanned_input`, never `payloads.output`
   directly.** Two of them once called `.strip()` on the raw payload. CPython makes that
   free when nothing is stripped and an O(n) copy when something is — 2.1ms on 10MB — and
@@ -300,17 +306,22 @@ reported as `detector_errors` — but do not rely on that.
 **A new sink** — add it to `runtime.emit()`. That function is the single fan-out point, which
 is why an OpenTelemetry bridge would be a two-line change.
 
-**Cross-process propagation** (the main v0.2 item). Be clear about what exists today: the
-`Propagator` protocol has exactly three methods — `current()`, `attach()`, `detach()` — and
-nothing in the library calls `inject()` or `extract()`. **The protocol will have to be
-extended, not merely implemented.** What the indirection buys is that the decorator asks a
-`Propagator` rather than reading a `ContextVar`, so the change is confined to
-`propagation.py` and whatever calls the new methods at boundaries; the four wrappers do not
-move.
+**A cross-process propagator.** The protocol now carries five methods — `current`,
+`attach`, `detach`, `inject`, `extract` — and the seam did what it was supposed to do: the
+four decorator wrappers were not touched to add distributed tracing.
 
-The work is roughly: add `inject() -> dict` / `extract(dict)` to the protocol and the
-default implementation, emit a W3C-style `traceparent` (the id widths in `_ids.py` already
-match), and build a merge step that stitches partial webs from several processes into one
-document — including deciding what to do about clock skew and traces whose root is in a
-process that died. That last part is the real work, and it is a distributed-systems
-problem rather than a decorator problem.
+`inject()` reduces the active node to a W3C `traceparent` string (the id widths in
+`_ids.py` were chosen to match). `extract()` rebuilds a `NodeRef` that stands in for a node
+living in another process. That stand-in is never recorded locally — it belongs to the
+process that created it — so no node is duplicated when both files are read together.
+
+The "merge step" turned out to need no code at all, which is the design paying off: both
+processes emit records carrying the same `trace_id`, and the child's records carry a
+`parent_id` pointing at the remote node. `graph_from_jsonl()` over a directory already
+sorts by `seq` and joins on ids. Read one file and the edge is dangling; read both and it
+resolves.
+
+What remains genuinely unsolved: **clock skew** (`started_unix_ns` is each machine's own
+wall clock, so cross-process ordering by timestamp is unreliable — `seq` is only monotonic
+within a process), and **partial traces** where the process holding the root died before
+writing. Both are distributed-systems problems rather than decorator problems.

@@ -58,5 +58,31 @@ Practical guidance:
   `webrtrace.set_capture(False)` or `WEBR_CAPTURE=0`.
 - Scrub traces before attaching them to a bug report.
 
-A redaction hook — a caller-supplied function applied to payloads before they are recorded
-— is planned and not yet implemented. Until it exists, the controls above are what you have.
+## Redaction
+
+A redactor runs on payload text **before** it is fingerprinted, before the detectors see
+it, and before anything reaches memory or disk:
+
+```python
+import webrtrace
+
+webrtrace.set_redactor(webrtrace.common_secrets)          # process-wide
+
+@webrtrace.webR_node(redact=my_scrubber)                  # or per node
+def handle(prompt: str) -> str: ...
+```
+
+**It fails closed.** If your redactor raises or returns a non-string, the payload is
+*discarded* rather than recorded, and `redaction_failed` appears in the node's signals. Any
+other behaviour would mean the one input that breaks your redactor is the one input written
+out in full.
+
+`common_secrets` is a **floor, not a guarantee.** It matches structurally distinctive
+secrets — API keys, bearer tokens, JWTs, AWS key ids, `password:` assignments, email
+addresses, card-length digit runs. It will not catch a customer's name, an address, or a
+medical detail, and it will occasionally redact something harmless. If you have a real
+regulatory obligation, write a redactor for your own data and pass that instead.
+
+One consequence worth knowing: because redaction happens before hashing, two payloads
+differing only in redacted content hash identically. The hash then answers "did the
+non-secret part change", which is usually what you want.

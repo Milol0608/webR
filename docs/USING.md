@@ -200,6 +200,19 @@ webrtrace.set_capture(True, full=True)
 Be deliberate about that one. Full capture writes prompts verbatim, and prompts contain
 customer data. It is the setting most likely to turn a trace file into a liability.
 
+Scrub payloads before they are recorded — this runs before the hash, before the detectors,
+and before anything touches memory or disk:
+
+```python
+webrtrace.set_redactor(webrtrace.common_secrets)     # API keys, tokens, emails, cards
+webrtrace.set_redactor(my_own_scrubber)              # anything you actually must remove
+```
+
+If a redactor raises, the payload is **dropped rather than stored unredacted**, and
+`redaction_failed` shows up in that node's signals. `common_secrets` catches things with a
+distinctive shape; it does not catch names, addresses, or medical detail. See
+[SECURITY.md](../SECURITY.md#redaction).
+
 ---
 
 ## Teaching webR what "wrong" means for you
@@ -265,7 +278,7 @@ print(web["stats"])
 | `write_errors` > 0 in `get_writer().stats()` | The disk write failed | Tracing continued in memory; disk records after that point are lost |
 | `pins_dropped` > 0 | More than `pinned_capacity` failures occurred; the oldest were evicted | Raise `pinned_capacity`, or stream to disk |
 | `detection_truncated` on a node | The payload exceeded the detector scan window and was sampled head-and-tail | Treat that node's signals as indicative, not authoritative — see the note on `novel_numbers` below |
-| Many separate `traces` when you expected one | Work crossed a boundary the context could not | Use `webrtrace.submit()` for `ThreadPoolExecutor`, or a `SENDS` token |
+| Many separate `traces` when you expected one | Work crossed a boundary the context could not | `webrtrace.submit()` for `ThreadPoolExecutor`; `inject()`/`remote_parent()` across processes; a `SENDS` token for a pure data hand-off |
 
 Errors, suspects, tainted nodes, **and their ancestor chains** are protected from *age*
 eviction — a failure at minute two survives an hour of subsequent successes. They are not

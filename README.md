@@ -184,6 +184,42 @@ queue.put({"payload": data, "webr": token.to_dict()})
 webrtrace.link(Link.from_dict(message["webr"]))
 ```
 
+---
+
+## Across processes
+
+A `SENDS` edge records that data moved. To make work in another process a genuine *child*
+of the caller — same trace, real parent/child edge — pass the trace context:
+
+```python
+# in the caller
+message = {"payload": data, **webrtrace.inject()}   # {"traceparent": "00-...-01"}
+
+# in the worker, wherever it runs
+with webrtrace.remote_parent(message):
+    handle(message["payload"])                      # traced calls here join the trace
+```
+
+`inject()` emits a W3C Trace Context `traceparent`, so the carrier works directly as HTTP
+headers and is readable by other tracing tools. A missing or malformed carrier costs you
+the link, never the request — the worker just starts its own trace.
+
+Each process writes its own JSONL file. Point the reader at the directory and the halves
+join up:
+
+```bash
+python -m webrtrace traces/          # parent.jsonl + worker-*.jsonl -> one web
+```
+
+Two honest limits. **Taint stops at the boundary** — a child process's failure marks its
+local ancestors, not the caller in the parent process, because taint rides on mutable state
+that cannot cross a process. The failure chain still crosses; only the `*` does not. And
+**`started_unix_ns` is each machine's own wall clock**, so ordering nodes across processes
+by timestamp is unreliable; `seq` is monotonic only within a process.
+
+See [`examples/05_across_processes.py`](examples/05_across_processes.py) for a runnable
+version that spawns a real worker.
+
 Linking is keyed on object **identity**, never equality: two equal lists are not the same
 datum, and treating them as one would invent edges that never existed. `link()` returns
 `False` rather than raising when it cannot resolve a source — a missing edge is a gap in
@@ -343,10 +379,11 @@ Stated plainly, because a debugging tool that overstates itself is worse than no
   loops, refusals, and passthroughs. Semantic falsehood needs embeddings or a judge model.
   The `Detector` protocol is public so such a detector can be added — but not inline; see
   [ADR 0002](docs/adr/0002-inline-detection.md).
-- **It does not trace across processes yet.** `asyncio`, threads, and `ThreadPoolExecutor`
-  (via `submit`) are covered. Multi-process and multi-machine propagation needs a
-  serializable envelope and a trace-merge step; the API seam exists and the work is
-  planned, not done. `SENDS` tokens already cross any boundary.
+- **Cross-process tracing has no automatic discovery.** `asyncio`, threads, and
+  `ThreadPoolExecutor` (via `submit`) propagate on their own. Crossing a process or a
+  machine requires you to pass the carrier explicitly — `inject()` on one side,
+  `remote_parent()` on the other — and to export both sides' JSONL together. There is no
+  agent that finds your workers for you.
 - **It does not `fsync`.** Records are flushed to the OS, which survives a process crash —
   the scenario this exists for. A power cut can still lose the last batch.
 - **It is pre-1.0.** The API may change between minor versions.
