@@ -2,14 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """webR -- causality tracing for multi-agent AI systems.
 
-The public surface is intentionally small. Milestone 1 exposes the data model and the
-propagation seam; `@webR_node` arrives in milestone 2.
+    from webr import webR_node
+
+    @webR_node
+    async def planner(task: str) -> str:
+        ...
+
+Every call becomes a node and every caller/callee relationship becomes an edge, so that
+when the system fails silently the web can say where.
 """
 
 from __future__ import annotations
 
 from ._ids import new_node_id, new_trace_id
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
+from .decorator import submit, webR_node
 from .propagation import (
     ContextVarPropagator,
     NodeRef,
@@ -19,6 +26,15 @@ from .propagation import (
     set_propagator,
 )
 from .records import EdgeKind, EdgeRecord, ErrorInfo, NodeRecord, NodeStatus
+from .runtime import (
+    configure,
+    disable,
+    enable,
+    get_buffer,
+    is_enabled,
+    reset,
+    set_buffer,
+)
 
 __version__ = "0.0.1"
 
@@ -35,9 +51,18 @@ __all__ = [
     "Propagator",
     "TraceBuffer",
     "__version__",
+    "configure",
+    "disable",
+    "enable",
+    "get_buffer",
     "get_propagator",
+    "is_enabled",
     "new_node_id",
     "new_root",
     "new_trace_id",
+    "reset",
+    "set_buffer",
     "set_propagator",
+    "submit",
+    "webR_node",
 ]
