@@ -17,6 +17,13 @@ from __future__ import annotations
 from ._ids import new_node_id, new_trace_id
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .decorator import submit, webR_node
+from .graph import (
+    SCHEMA_VERSION,
+    export_graph,
+    graph_from_jsonl,
+    load_jsonl,
+    write_graph,
+)
 from .propagation import (
     ContextVarPropagator,
     NodeRef,
@@ -30,21 +37,28 @@ from .runtime import (
     configure,
     disable,
     enable,
+    flush,
     get_buffer,
+    get_writer,
     is_enabled,
     reset,
     set_buffer,
+    start_writer,
+    stop_writer,
 )
+from .writer import JsonlWriter
 
 __version__ = "0.0.1"
 
 __all__ = [
     "DEFAULT_CAPACITY",
     "DEFAULT_PINNED_CAPACITY",
+    "SCHEMA_VERSION",
     "ContextVarPropagator",
     "EdgeKind",
     "EdgeRecord",
     "ErrorInfo",
+    "JsonlWriter",
     "NodeRecord",
     "NodeRef",
     "NodeStatus",
@@ -54,15 +68,23 @@ __all__ = [
     "configure",
     "disable",
     "enable",
+    "export_graph",
+    "flush",
     "get_buffer",
     "get_propagator",
+    "get_writer",
+    "graph_from_jsonl",
     "is_enabled",
+    "load_jsonl",
     "new_node_id",
     "new_root",
     "new_trace_id",
     "reset",
     "set_buffer",
     "set_propagator",
+    "start_writer",
+    "stop_writer",
     "submit",
     "webR_node",
+    "write_graph",
 ]
