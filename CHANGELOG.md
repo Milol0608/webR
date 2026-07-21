@@ -3,7 +3,9 @@
 Notable changes to webR. This project follows [Semantic Versioning](https://semver.org/);
 while the major version is `0`, the public API may change between minor releases.
 
-## [Unreleased]
+## [0.1.0] — 2026-07-21
+
+First public release.
 
 ### Added
 
