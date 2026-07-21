@@ -14,6 +14,9 @@ threads and process boundaries do not, and are handled explicitly in later miles
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -97,9 +100,23 @@ def new_root(name: str) -> NodeRef:
     return NodeRef(trace_id=new_trace_id(), node_id=new_node_id(), name=name, depth=0)
 
 
+#: W3C Trace Context version and flags. webR does not implement sampling, so the flag
+#: byte is constant -- but emitting the standard shape means an existing OpenTelemetry
+#: collector can read the header, and vice versa.
+_TRACEPARENT_VERSION = "00"
+_TRACEPARENT_FLAGS = "01"
+
+_TRACEPARENT_RE = re.compile(r"^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
+
+
 @runtime_checkable
 class Propagator(Protocol):
-    """Carries the active `NodeRef` across whatever boundaries it can."""
+    """Carries the active `NodeRef` across whatever boundaries it can.
+
+    `current`/`attach`/`detach` handle in-process propagation. `inject`/`extract` carry a
+    trace across a boundary the runtime cannot cross on its own -- a queue message, an
+    HTTP header, a subprocess argument -- by reducing the active node to a string.
+    """
 
     def current(self) -> NodeRef | None:
         """The node executing right now, or None if outside any traced call."""
@@ -111,6 +128,14 @@ class Propagator(Protocol):
 
     def detach(self, token: Any) -> None:
         """Restore whatever was current before the matching `attach`."""
+        ...
+
+    def inject(self) -> dict[str, str]:
+        """A serializable carrier naming the active node, or `{}` if there is none."""
+        ...
+
+    def extract(self, carrier: dict[str, str]) -> NodeRef | None:
+        """Rebuild a parent reference from a carrier, or None if it is absent/malformed."""
         ...
 
 
@@ -135,8 +160,81 @@ class ContextVarPropagator:
     def detach(self, token: Token[NodeRef | None]) -> None:
         _current.reset(token)
 
+    def inject(self) -> dict[str, str]:
+        """Reduce the active node to a W3C `traceparent` header.
+
+        Returns an empty carrier outside a traced call rather than inventing a trace --
+        a receiver would otherwise become the root of a trace that never had a caller.
+        """
+        ref = _current.get()
+        if ref is None:
+            return {}
+        parent = f"{_TRACEPARENT_VERSION}-{ref.trace_id}-{ref.node_id}-{_TRACEPARENT_FLAGS}"
+        return {"traceparent": parent}
+
+    def extract(self, carrier: dict[str, str]) -> NodeRef | None:
+        """Rebuild the remote caller from a carrier.
+
+        The returned ref stands in for a node that lives in another process. Nothing
+        local ever completes it, so no record is written for it here -- it exists purely
+        to give local nodes the right `parent_id`. The two halves are stitched together
+        at export time, when both processes' JSONL files are read together.
+
+        Malformed or absent carriers return None rather than raising: a trace context
+        that arrived corrupted should cost you the link, not the request.
+        """
+        if not carrier:
+            return None
+        raw = carrier.get("traceparent") or carrier.get("Traceparent")
+        if not isinstance(raw, str):
+            return None
+        match = _TRACEPARENT_RE.match(raw.strip().lower())
+        if match is None:
+            return None
+        _, trace_id, node_id, _ = match.groups()
+        if trace_id == "0" * 32 or node_id == "0" * 16:
+            return None  # the all-zero ids are reserved as "invalid" by the spec
+        return NodeRef(trace_id=trace_id, node_id=node_id, name="<remote>", depth=0)
+
 
 _propagator: Propagator = ContextVarPropagator()
+
+
+def inject() -> dict[str, str]:
+    """A carrier naming the current node, to send wherever the work is going.
+
+        message = {"payload": data, **webrtrace.inject()}
+        queue.put(message)
+
+    Empty outside a traced call. The carrier is a plain `{"traceparent": "..."}` dict in
+    W3C Trace Context format, so it can be used directly as HTTP headers.
+    """
+    return _propagator.inject()
+
+
+@contextmanager
+def remote_parent(carrier: dict[str, str]) -> Iterator[NodeRef | None]:
+    """Run this block as a child of a node in another process.
+
+        with webrtrace.remote_parent(message):
+            handle(message["payload"])
+
+    Traced calls inside the block join the caller's trace and record it as their parent.
+    Nothing is recorded *for* the remote node here -- it belongs to the process that
+    created it. Export both processes' JSONL files together and the halves join up; until
+    then the edge reads as dangling, which is honest rather than broken.
+
+    An absent or malformed carrier is not an error: the block simply starts a new trace.
+    """
+    ref = _propagator.extract(carrier)
+    if ref is None:
+        yield None
+        return
+    token = _propagator.attach(ref)
+    try:
+        yield ref
+    finally:
+        _propagator.detach(token)
 
 
 def get_propagator() -> Propagator:
