@@ -36,6 +36,14 @@ from .propagation import (
     set_propagator,
 )
 from .records import EdgeKind, EdgeRecord, ErrorInfo, NodeRecord, NodeStatus
+from .render import (
+    failure_chains,
+    render,
+    render_failures,
+    render_links,
+    render_summary,
+    render_tree,
+)
 from .runtime import (
     configure,
     disable,
@@ -81,6 +89,7 @@ __all__ = [
     "disable",
     "enable",
     "export_graph",
+    "failure_chains",
     "fingerprint",
     "flush",
     "get_buffer",
@@ -96,6 +105,11 @@ __all__ = [
     "new_root",
     "new_trace_id",
     "origin",
+    "render",
+    "render_failures",
+    "render_links",
+    "render_summary",
+    "render_tree",
     "reset",
     "set_buffer",
     "set_capture",
