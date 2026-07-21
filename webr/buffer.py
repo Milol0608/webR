@@ -28,7 +28,7 @@ import threading
 from collections import deque
 from collections.abc import Iterable
 
-from .records import NodeRecord
+from .records import EdgeRecord, NodeRecord
 
 DEFAULT_CAPACITY = 100_000
 DEFAULT_PINNED_CAPACITY = 10_000
@@ -49,6 +49,8 @@ class TraceBuffer:
     __slots__ = (
         "_capacity",
         "_dropped",
+        "_edges",
+        "_edges_dropped",
         "_lock",
         "_pin_requests",
         "_pinned",
@@ -80,6 +82,22 @@ class TraceBuffer:
         self._pin_requests: dict[str, None] = {}
         self._dropped = 0
         self._pins_dropped = 0
+        # Explicit SENDS edges. Kept in their own ring: they are far rarer than nodes and
+        # must not be squeezed out by node volume.
+        self._edges: deque[EdgeRecord] = deque(maxlen=capacity)
+        self._edges_dropped = 0
+
+    def append_edge(self, edge: EdgeRecord) -> None:
+        """Record a declared data-dependency edge. O(1)."""
+        with self._lock:
+            if len(self._edges) == self._edges.maxlen:
+                self._edges_dropped += 1
+            self._edges.append(edge)
+
+    def edges(self) -> list[EdgeRecord]:
+        """Every retained edge, in declaration order."""
+        with self._lock:
+            return sorted(self._edges, key=lambda edge: edge.seq)
 
     def append(self, record: NodeRecord) -> None:
         """Record a completed node. O(1), never blocks on I/O."""
@@ -129,6 +147,8 @@ class TraceBuffer:
                 "pinned": len(self._pinned),
                 "dropped": self._dropped,
                 "pins_dropped": self._pins_dropped,
+                "sends_edges": len(self._edges),
+                "sends_edges_dropped": self._edges_dropped,
                 "capacity": self._capacity,
                 "pinned_capacity": self._pinned_capacity,
             }
@@ -141,8 +161,10 @@ class TraceBuffer:
             self._pinned.clear()
             self._pinned_order.clear()
             self._pin_requests.clear()
+            self._edges.clear()
             self._dropped = 0
             self._pins_dropped = 0
+            self._edges_dropped = 0
 
     def __len__(self) -> int:
         with self._lock:
