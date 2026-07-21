@@ -26,6 +26,7 @@ from .graph import (
     load_jsonl,
     write_graph,
 )
+from .links import Link, clear_marks, link, mark, mark_count, origin
 from .propagation import (
     ContextVarPropagator,
     NodeRef,
@@ -67,6 +68,7 @@ __all__ = [
     "EdgeRecord",
     "ErrorInfo",
     "JsonlWriter",
+    "Link",
     "NodeRecord",
     "NodeRef",
     "NodeStatus",
@@ -74,6 +76,7 @@ __all__ = [
     "Propagator",
     "TraceBuffer",
     "__version__",
+    "clear_marks",
     "configure",
     "disable",
     "enable",
@@ -85,10 +88,14 @@ __all__ = [
     "get_writer",
     "graph_from_jsonl",
     "is_enabled",
+    "link",
     "load_jsonl",
+    "mark",
+    "mark_count",
     "new_node_id",
     "new_root",
     "new_trace_id",
+    "origin",
     "reset",
     "set_buffer",
     "set_capture",
