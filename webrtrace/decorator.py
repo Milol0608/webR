@@ -66,16 +66,38 @@ class _Spec:
 def _error_info(exc: BaseException) -> ErrorInfo:
     """Render an exception to plain strings.
 
-    The traceback is formatted here rather than stored as frame objects: holding frames
-    would keep every local in the failing stack alive for as long as the record sits in
-    the buffer, which is a memory leak wearing a very convincing disguise.
+    Every step here is defended, because both `str(exc)` and `format_exception` execute
+    user code. An exception class with a lazy `__str__` -- common in ORM and RPC layers,
+    where the message is built on demand -- can raise while being rendered. If that
+    escaped, webR would turn a recoverable error in the traced program into a different,
+    unrecoverable one, which is the single thing this library must never do.
+
+    The traceback is formatted rather than stored as frame objects: holding frames would
+    keep every local in the failing stack alive for as long as the record sits in the
+    buffer, which is a memory leak wearing a very convincing disguise.
     """
-    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    if len(rendered) > MAX_TRACEBACK_CHARS:
+    try:
+        name = type(exc).__name__
+    except Exception:
+        name = "<unknown>"
+
+    try:
+        message = str(exc)
+    except Exception as render_failure:
+        message = f"<{name}.__str__ raised {type(render_failure).__name__}>"
+
+    try:
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        # format_exception calls str() on the exception too, so it can fail the same way.
+        rendered = None
+
+    if rendered is not None and len(rendered) > MAX_TRACEBACK_CHARS:
         head = MAX_TRACEBACK_CHARS // 2
         tail = MAX_TRACEBACK_CHARS - head
         rendered = f"{rendered[:head]}\n...[truncated]...\n{rendered[-tail:]}"
-    return ErrorInfo(type=type(exc).__name__, message=str(exc), traceback=rendered)
+
+    return ErrorInfo(type=name, message=message, traceback=rendered)
 
 
 def _collect_inputs(spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:
