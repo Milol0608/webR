@@ -148,7 +148,9 @@ def link(source: Any, label: str | None = None) -> bool:
             src_id=resolved.node_id,
             dst_id=current.node_id,
             seq=next_seq(),
-            label=label or resolved.label,
+            # `label if label is not None` rather than `label or`: an explicit empty
+            # string is a caller deliberately suppressing the mark's label.
+            label=label if label is not None else resolved.label,
         )
     )
     return True

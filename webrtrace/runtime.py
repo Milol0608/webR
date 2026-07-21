@@ -185,7 +185,15 @@ def reset() -> None:
     silently truncating a file the user asked for would be a nasty surprise.
     """
     global enabled, capture, capture_full, detectors, suspect_signals
+    # Imported here rather than at module scope: `links` imports this module, and a
+    # top-level import either way would be circular.
+    from .links import clear_marks
+
     _buffer.clear()
+    # Marks outliving a reset meant a later link() could resolve to a node from the
+    # discarded run, emitting an edge that claims data flowed from a node that is no
+    # longer in the trace. Fabricated provenance is worse than a missing edge.
+    clear_marks()
     enabled = True
     capture = _env_flag("WEBR_CAPTURE", True)
     capture_full = _env_flag("WEBR_CAPTURE_FULL", False)
