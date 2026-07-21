@@ -15,10 +15,26 @@ threads and process boundaries do not, and are handled explicitly in later miles
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ._ids import new_node_id, new_trace_id
+
+
+class NodeState:
+    """The one mutable thing about a node while it runs.
+
+    A node cannot know at its own start whether it will end up tainted -- that depends on
+    a descendant failing later. And a parent finishes *after* its children, so a child
+    that fails must be able to mark parents that have not completed yet. `NodeRef` stays
+    frozen (it is copied across contexts and must never be rebound); this small mutable
+    companion carries the one flag that legitimately changes.
+    """
+
+    __slots__ = ("tainted",)
+
+    def __init__(self) -> None:
+        self.tainted = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +53,20 @@ class NodeRef:
     name: str
     depth: int = 0
     parent: NodeRef | None = None
+    # Excluded from equality and repr: it is incidental state, not part of identity.
+    state: NodeState = field(default_factory=NodeState, compare=False, repr=False)
+
+    def taint_ancestors(self) -> None:
+        """Mark every node above this one as downstream of a failure.
+
+        Taint flows *up* the call tree because that is the direction data flows: a parent
+        consumed whatever this node produced, so if this output is wrong, everything that
+        used it is suspect too.
+        """
+        node = self.parent
+        while node is not None:
+            node.state.tainted = True
+            node = node.parent
 
     def child(self, name: str) -> NodeRef:
         """Return a ref for a node invoked by this one, in the same trace."""
