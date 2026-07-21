@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
+from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector
 from .records import NodeRecord
 from .writer import JsonlWriter
 
@@ -40,6 +41,40 @@ def _env_flag(name: str, default: bool) -> bool:
 
 #: Whether instrumented callables record anything. Read on every traced call.
 enabled: bool = _env_flag("WEBR_ENABLED", True)
+
+#: Whether string payloads are fingerprinted and run through the detectors. On by default
+#: so webR is useful without configuration; see ADR 0002 for what that costs.
+capture: bool = _env_flag("WEBR_CAPTURE", True)
+
+#: When True, capture stores the payload text itself (capped) rather than a fingerprint.
+capture_full: bool = _env_flag("WEBR_CAPTURE_FULL", False)
+
+#: Detectors run on every captured node.
+detectors: tuple[Detector, ...] = DEFAULT_DETECTORS
+
+#: Signals that, on their own, mark a node suspect.
+suspect_signals: frozenset[str] = DEFAULT_SUSPECT_SIGNALS
+
+
+def set_capture(on: bool, *, full: bool | None = None) -> None:
+    """Turn payload capture on or off process-wide, optionally switching to full text."""
+    global capture, capture_full
+    capture = on
+    if full is not None:
+        capture_full = full
+
+
+def set_detectors(*chosen: Detector) -> None:
+    """Replace the detector set. Passing nothing disables detection but keeps capture."""
+    global detectors
+    detectors = tuple(chosen)
+
+
+def set_suspect_signals(*names: str) -> None:
+    """Choose which signals are damning enough to mark a node suspect."""
+    global suspect_signals
+    suspect_signals = frozenset(names)
+
 
 _buffer = TraceBuffer()
 _writer: JsonlWriter | None = None
@@ -141,6 +176,10 @@ def reset() -> None:
     Does not touch the writer: records already on disk are the durable history, and
     silently truncating a file the user asked for would be a nasty surprise.
     """
-    global enabled
+    global enabled, capture, capture_full, detectors, suspect_signals
     _buffer.clear()
     enabled = True
+    capture = _env_flag("WEBR_CAPTURE", True)
+    capture_full = _env_flag("WEBR_CAPTURE_FULL", False)
+    detectors = DEFAULT_DETECTORS
+    suspect_signals = DEFAULT_SUSPECT_SIGNALS
