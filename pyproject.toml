@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "webrtrace"
-version = "0.0.1"
+# Single-sourced from webrtrace/__init__.py so the packaged version and the runtime
+# __version__ can never disagree.
+dynamic = ["version"]
 description = "Causality tracing for multi-agent AI systems: find the node that broke the chain."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +47,9 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 Homepage = "https://github.com/Milol0608/webR"
 Issues = "https://github.com/Milol0608/webR/issues"
 Changelog = "https://github.com/Milol0608/webR/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "webrtrace/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["webrtrace"]
