@@ -23,10 +23,15 @@ from .buffer import TraceBuffer
 from .records import EdgeKind, now_unix_ns
 
 #: Bump when the document layout changes in a way consumers must notice.
-SCHEMA_VERSION = 1
+#: v2 added the `record` discriminator and explicit `sends` edges.
+SCHEMA_VERSION = 2
 
 
-def _build(nodes: list[dict[str, Any]], source_stats: dict[str, Any]) -> dict[str, Any]:
+def _build(
+    nodes: list[dict[str, Any]],
+    sends: list[dict[str, Any]],
+    source_stats: dict[str, Any],
+) -> dict[str, Any]:
     from . import __version__
 
     index = {node["node_id"] for node in nodes}
@@ -50,6 +55,17 @@ def _build(nodes: list[dict[str, Any]], source_stats: dict[str, Any]) -> dict[st
             edge["dangling"] = True
         edges.append(edge)
 
+    for declared in sends:
+        # A SENDS edge may legitimately cross traces -- that is the whole point when a
+        # payload moves through a queue -- so a missing endpoint is flagged, never
+        # dropped, exactly as for call edges.
+        entry = {key: value for key, value in declared.items() if key != "record"}
+        missing = declared["src_id"] not in index or declared["dst_id"] not in index
+        if missing:
+            entry["dangling"] = True
+            dangling += 1
+        edges.append(entry)
+
     statuses: dict[str, int] = {}
     for node in nodes:
         statuses[node["status"]] = statuses.get(node["status"], 0) + 1
@@ -66,6 +82,8 @@ def _build(nodes: list[dict[str, Any]], source_stats: dict[str, Any]) -> dict[st
             **source_stats,
             "nodes": len(nodes),
             "edges": len(edges),
+            "invokes_edges": len(edges) - len(sends),
+            "sends_edges": len(sends),
             "dangling_edges": dangling,
             "by_status": statuses,
         },
@@ -76,7 +94,8 @@ def export_graph(buffer: TraceBuffer | None = None) -> dict[str, Any]:
     """Build a graph document from what is currently retained in memory."""
     target = buffer if buffer is not None else runtime.get_buffer()
     nodes = [record.to_dict() for record in target.records()]
-    return _build(nodes, {"source": "buffer", **target.stats()})
+    sends = [edge.to_dict() for edge in target.edges()]
+    return _build(nodes, sends, {"source": "buffer", **target.stats()})
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -109,16 +128,20 @@ def graph_from_jsonl(path: str | Path) -> dict[str, Any]:
     target = Path(path)
     files = sorted(target.iterdir()) if target.is_dir() else [target]
 
-    nodes: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     read = 0
     for file in files:
         if file.is_dir():
             continue
-        nodes.extend(load_jsonl(file))
+        entries.extend(load_jsonl(file))
         read += 1
 
-    nodes.sort(key=lambda node: node.get("seq", 0))
-    return _build(nodes, {"source": "jsonl", "files_read": read})
+    entries.sort(key=lambda entry: entry.get("seq", 0))
+    # Lines written before schema v2 carry no discriminator; treat them as nodes, which
+    # is what they were, rather than refusing to read an older trace file.
+    nodes = [entry for entry in entries if entry.get("record", "node") == "node"]
+    sends = [entry for entry in entries if entry.get("record") == "edge"]
+    return _build(nodes, sends, {"source": "jsonl", "files_read": read})
 
 
 def write_graph(path: str | Path, buffer: TraceBuffer | None = None, *, indent: int = 2) -> Path:
