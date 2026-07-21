@@ -15,6 +15,7 @@ python examples/01_hello_web.py
 | [`02_catching_hallucinations.py`](02_catching_hallucinations.py) | All eight detectors firing — and which ones webR deliberately refuses to treat as guilt |
 | [`03_the_silent_failure.py`](03_the_silent_failure.py) | **Start here.** A run with zero exceptions and a wrong answer, and how webR names the origin |
 | [`04_links_across_a_queue.py`](04_links_across_a_queue.py) | Data dependencies the call stack cannot see, in-process and across a thread |
+| [`05_across_processes.py`](05_across_processes.py) | A real worker process joining the caller's trace, and a failure chain that crosses the boundary |
 
 ## Reading a trace from disk
 
