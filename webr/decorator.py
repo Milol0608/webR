@@ -87,7 +87,7 @@ def _finish(
         buffer.pin(ref.chain_ids())
 
     parent = ref.parent
-    buffer.append(
+    runtime.emit(
         NodeRecord(
             trace_id=ref.trace_id,
             node_id=ref.node_id,

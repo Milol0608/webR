@@ -15,8 +15,12 @@ will not do what you want.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from typing import Any
 
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
+from .records import NodeRecord
+from .writer import JsonlWriter
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
@@ -38,6 +42,19 @@ def _env_flag(name: str, default: bool) -> bool:
 enabled: bool = _env_flag("WEBR_ENABLED", True)
 
 _buffer = TraceBuffer()
+_writer: JsonlWriter | None = None
+
+
+def emit(record: NodeRecord) -> None:
+    """Hand a completed node to every sink. Called once per traced call.
+
+    The buffer is the bounded live view; the writer, when running, is the durable record.
+    Both are O(1) appends -- no serialization happens here.
+    """
+    _buffer.append(record)
+    writer = _writer
+    if writer is not None:
+        writer.submit(record)
 
 
 def is_enabled() -> bool:
@@ -82,8 +99,48 @@ def configure(
     return buffer
 
 
+def start_writer(
+    path: str | Path = "traces/webr.jsonl",
+    **options: Any,
+) -> JsonlWriter:
+    """Begin streaming completed nodes to a JSONL file.
+
+    Without this, webR keeps only the bounded in-memory view, and a hard crash takes the
+    trace with it. Any writer already running is stopped first so that two writers can
+    never interleave lines into the same file.
+    """
+    global _writer
+    stop_writer()
+    _writer = JsonlWriter(path, **options)
+    return _writer
+
+
+def stop_writer(timeout: float = 5.0) -> None:
+    """Drain and close the active writer, if any."""
+    global _writer
+    writer, _writer = _writer, None
+    if writer is not None:
+        writer.stop(timeout=timeout)
+
+
+def get_writer() -> JsonlWriter | None:
+    """The active writer, or None if nothing is being streamed to disk."""
+    return _writer
+
+
+def flush() -> None:
+    """Push everything queued to the OS. Useful before reading a trace file back."""
+    writer = _writer
+    if writer is not None:
+        writer.flush()
+
+
 def reset() -> None:
-    """Drop everything recorded so far and re-enable tracing."""
+    """Drop everything recorded so far and re-enable tracing.
+
+    Does not touch the writer: records already on disk are the durable history, and
+    silently truncating a file the user asked for would be a nasty surprise.
+    """
     global enabled
     _buffer.clear()
     enabled = True
