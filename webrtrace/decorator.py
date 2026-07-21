@@ -305,15 +305,30 @@ def webR_node(
 
 
 def _parameter_names(func: Any) -> tuple[str, ...]:
-    """Positional parameter names, resolved once.
+    """Names of the parameters that positional arguments actually bind to, in order.
+
+    Only `POSITIONAL_ONLY` and `POSITIONAL_OR_KEYWORD` qualify, and the scan stops at a
+    `*args`. Taking every parameter name was a bug: zipping the full list against the
+    flat positional tuple paired the *name* `args` with the *first extra value*, so
+    `def f(a, *args)` called as `f("x", "y", "z")` captured `"y"` under the name `args`.
+    That is a silent misattribution, which is worse than capturing nothing.
 
     A callable that refuses introspection -- some builtins and C extensions do -- simply
     gets no named inputs rather than breaking decoration.
     """
     try:
-        return tuple(inspect.signature(func).parameters)
+        parameters = inspect.signature(func).parameters
     except (TypeError, ValueError):
         return ()
+
+    names: list[str] = []
+    for name, parameter in parameters.items():
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
+            names.append(name)
+        elif parameter.kind is parameter.VAR_POSITIONAL:
+            # Everything from here on is variadic; no positional index maps to a name.
+            break
+    return tuple(names)
 
 
 def _wrap_sync(func: Any, spec: _Spec) -> Any:
@@ -373,47 +388,93 @@ def _wrap_generator(func: Any, spec: _Spec) -> Any:
     `GeneratorExit` is recorded as success, not failure. A consumer that `break`s out of
     a loop has abandoned the generator, which is ordinary control flow; reporting it as
     an error would fill the web with failures that never happened.
+
+    The wrapper is a full delegating generator: `send`, `throw`, `close`, and the return
+    value carried by `StopIteration` all pass through. An earlier version caught thrown
+    exceptions and closed the inner generator instead of throwing into it, which meant a
+    generator that recovers from an exception could no longer do so once traced -- the
+    library changing program behaviour, which it must never do.
     """
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not runtime.enabled:
-            # `yield from` forwards send() and throw() correctly, so the untraced path
-            # behaves identically to the traced one.
-            yield from func(*args, **kwargs)
-            return
+            # `yield from` forwards send(), throw(), and the return value, which is
+            # exactly what the traced path below reproduces by hand.
+            return (yield from func(*args, **kwargs))
 
         propagator = get_propagator()
         inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
         iterator = func(*args, **kwargs)
         ref = _open(spec.name)
         started_unix, started = now_unix_ns(), perf_counter_ns()
-        sent: Any = None
+        finished = False
+
+        def close_node(exc: BaseException | None = None) -> None:
+            # Idempotent: the GeneratorExit path records success and re-raises, and the
+            # outer handler must not then record the same node a second time.
+            nonlocal finished
+            if not finished:
+                finished = True
+                _finish(ref, None, started_unix, started, exc, spec, inputs)
+
+        def resume(value: Any = None, throw: BaseException | None = None) -> Any:
+            """Advance the inner generator with this node current."""
+            token = propagator.attach(ref)
+            try:
+                if throw is not None:
+                    return iterator.throw(throw)
+                return iterator.send(value)
+            finally:
+                propagator.detach(token)
+
         try:
+            try:
+                item = resume()
+            except StopIteration as stop:
+                close_node()
+                return stop.value
+
             while True:
-                token = propagator.attach(ref)
                 try:
-                    item = iterator.send(sent)
-                except StopIteration:
-                    break
-                finally:
-                    propagator.detach(token)
-                sent = yield item
-        except GeneratorExit:
-            iterator.close()
-            _finish(ref, None, started_unix, started, None, spec, inputs)
-            raise
+                    sent = yield item
+                except GeneratorExit:
+                    iterator.close()
+                    close_node()
+                    raise
+                except BaseException as thrown:
+                    # Forward it into the generator, which may handle it and yield again.
+                    try:
+                        item = resume(throw=thrown)
+                    except StopIteration as stop:
+                        close_node()
+                        return stop.value
+                else:
+                    try:
+                        item = resume(sent)
+                    except StopIteration as stop:
+                        close_node()
+                        return stop.value
         except BaseException as exc:
             iterator.close()
-            _finish(ref, None, started_unix, started, exc, spec, inputs)
+            close_node(exc)
             raise
-        _finish(ref, None, started_unix, started, None, spec, inputs)
 
     return wrapper
 
 
 def _wrap_async_generator(func: Any, spec: _Spec) -> Any:
-    """Async-generator counterpart of `_wrap_generator`, with the same semantics."""
+    """Async-generator counterpart of `_wrap_generator`, with the same semantics.
+
+    Two differences are forced by the language rather than chosen:
+
+    - There is no `async yield from`, so the delegation loop is written out by hand and
+      runs even when tracing is disabled. The disabled path therefore costs more here
+      than in the other three wrappers -- it still drives `asend` per item, it just skips
+      the context and the record.
+    - An async generator may not `return` a value (PEP 525), so there is no equivalent of
+      forwarding `StopIteration.value`.
+    """
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -423,32 +484,54 @@ def _wrap_async_generator(func: Any, spec: _Spec) -> Any:
         iterator = func(*args, **kwargs)
         ref = _open(spec.name) if tracing else None
         started_unix, started = now_unix_ns(), perf_counter_ns()
-        sent: Any = None
+        finished = False
+
+        def close_node(exc: BaseException | None = None) -> None:
+            nonlocal finished
+            if ref is not None and not finished:
+                finished = True
+                _finish(ref, None, started_unix, started, exc, spec, inputs)
+
+        async def resume(value: Any = None, throw: BaseException | None = None) -> Any:
+            token = propagator.attach(ref) if ref is not None else None
+            try:
+                if throw is not None:
+                    return await iterator.athrow(throw)
+                return await iterator.asend(value)
+            finally:
+                if token is not None:
+                    propagator.detach(token)
+
         try:
+            try:
+                item = await resume()
+            except StopAsyncIteration:
+                close_node()
+                return
+
             while True:
-                # `async for` cannot forward asend(), so the loop is written out even
-                # when tracing is off, keeping both paths behaviourally identical.
-                token = propagator.attach(ref) if ref is not None else None
                 try:
-                    item = await iterator.asend(sent)
-                except StopAsyncIteration:
-                    break
-                finally:
-                    if token is not None:
-                        propagator.detach(token)
-                sent = yield item
-        except GeneratorExit:
-            await iterator.aclose()
-            if ref is not None:
-                _finish(ref, None, started_unix, started, None, spec, inputs)
-            raise
+                    sent = yield item
+                except GeneratorExit:
+                    await iterator.aclose()
+                    close_node()
+                    raise
+                except BaseException as thrown:
+                    try:
+                        item = await resume(throw=thrown)
+                    except StopAsyncIteration:
+                        close_node()
+                        return
+                else:
+                    try:
+                        item = await resume(sent)
+                    except StopAsyncIteration:
+                        close_node()
+                        return
         except BaseException as exc:
             await iterator.aclose()
-            if ref is not None:
-                _finish(ref, None, started_unix, started, exc, spec, inputs)
+            close_node(exc)
             raise
-        if ref is not None:
-            _finish(ref, None, started_unix, started, None, spec, inputs)
 
     return wrapper
 
