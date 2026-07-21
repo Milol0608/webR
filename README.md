@@ -385,6 +385,16 @@ python -m ruff format --check .
 python benchmarks/overhead.py
 ```
 
+## Contributing
+
+Issues and pull requests are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and,
+more importantly, the five rules the library is built on. The first one governs everything
+else: **tracing must never change what the traced program does.**
+
+Security reports go through [private vulnerability reporting](SECURITY.md), which also
+explains exactly what ends up in a trace file. Read that section before enabling
+`capture_full` on anything handling real data.
+
 ## Naming
 
 The project is webR; the package is `webrtrace`, because `webr` on PyPI belongs to an
