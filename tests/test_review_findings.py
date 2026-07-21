@@ -131,6 +131,20 @@ def test_an_explicit_empty_label_is_not_overridden_by_the_mark_label(buffer):
     assert buffer.edges()[0].label == ""
 
 
+def test_a_validator_that_returns_none_marks_the_node_suspect(buffer):
+    # Deliberate and now documented: only True passes. A validator that falls off the end
+    # without returning is far more common than one deliberately abstaining, and silently
+    # passing a broken validator is the exact failure this library exists to catch.
+    @webR_node(name="agent", check=lambda out: None)
+    def agent(prompt):
+        return "anything"
+
+    agent("go")
+    record = by_name(buffer, "agent")
+    assert record.status.value == "suspect"
+    assert record.signals["suspect"] == "check returned a falsy value"
+
+
 def test_json_detector_respects_the_scan_bound():
     # DEF-2: detect_json_shape read the raw unbounded output. Touching scanned_output
     # is what marks the payload truncated, so this asserts the detector went through

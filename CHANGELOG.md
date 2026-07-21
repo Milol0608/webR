@@ -27,6 +27,26 @@ First public release.
 - **Explicit `SENDS` edges** — `mark()`/`link()` for in-process data dependencies and
   serializable `origin()` tokens for hand-offs across threads, queues, or machines.
 
+### Fixed before release
+
+Found by an independent adversarial review of the package, and kept as regression tests in
+`tests/test_review_findings.py`:
+
+- **Traced generators dropped `throw()` and `StopIteration.value`.** `gen.throw(exc)` closed
+  the inner generator instead of throwing into it, so a generator that recovers from an
+  exception could not once traced, and `value = yield from traced_gen()` returned `None`.
+  Both wrappers are now full delegating generators.
+- **`*args` was captured under the wrong name.** Zipping every parameter name against the
+  positional tuple paired the name `args` with the first extra value.
+- **`reset()` did not clear the mark registry**, so a later `link()` could emit an edge
+  pointing at a node from a discarded run.
+- **`link(value, "")` could not suppress a mark's label** (`or` instead of `is not None`).
+- **Two detectors stripped the raw payload**, an O(n) copy whenever leading whitespace was
+  present — 2.1ms on 10MB, on a path model output routinely takes. Now 0.86µs.
+- **Documentation corrections**, including a claim in `docs/USING.md` that pinned records
+  are "never evicted by age" — the pinned store is bounded and evicts, as `pins_dropped`
+  reports.
+
 ### Notes
 
 - Distributed (cross-process) propagation is not implemented. The API seam exists; see
