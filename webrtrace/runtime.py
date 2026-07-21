@@ -21,6 +21,7 @@ from typing import Any
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector
 from .records import EdgeRecord, NodeRecord
+from .redaction import Redactor
 from .writer import JsonlWriter
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -54,6 +55,20 @@ detectors: tuple[Detector, ...] = DEFAULT_DETECTORS
 
 #: Signals that, on their own, mark a node suspect.
 suspect_signals: frozenset[str] = DEFAULT_SUSPECT_SIGNALS
+
+#: Applied to payload text before it is fingerprinted, inspected, or stored.
+redactor: Redactor | None = None
+
+
+def set_redactor(fn: Redactor | None) -> None:
+    """Scrub every payload before it is recorded, process-wide.
+
+    `webrtrace.common_secrets` is a reasonable floor for API keys and tokens; write your
+    own for anything you actually have an obligation about. A redactor that raises causes
+    the payload to be dropped rather than recorded -- see `redaction.apply`.
+    """
+    global redactor
+    redactor = fn
 
 
 def set_capture(on: bool, *, full: bool | None = None) -> None:
@@ -184,7 +199,7 @@ def reset() -> None:
     Does not touch the writer: records already on disk are the durable history, and
     silently truncating a file the user asked for would be a nasty surprise.
     """
-    global enabled, capture, capture_full, detectors, suspect_signals
+    global enabled, capture, capture_full, detectors, suspect_signals, redactor
     # Imported here rather than at module scope: `links` imports this module, and a
     # top-level import either way would be circular.
     from .links import clear_marks
@@ -199,3 +214,4 @@ def reset() -> None:
     capture_full = _env_flag("WEBR_CAPTURE_FULL", False)
     detectors = DEFAULT_DETECTORS
     suspect_signals = DEFAULT_SUSPECT_SIGNALS
+    redactor = None

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Any, TypeVar
 
-from . import runtime
+from . import redaction, runtime
 from .detectors import is_suspect, run_detectors
 from .fingerprint import as_text, fingerprint
 from .propagation import NodeRef, get_propagator, new_root
@@ -53,6 +53,7 @@ class _Spec:
     capture: bool | tuple[str, ...] | None
     capture_full: bool | None
     check: Callable[[Any], Any] | None
+    redactor: redaction.Redactor | None
     param_names: tuple[str, ...]
 
     def wants_capture(self) -> bool:
@@ -182,6 +183,27 @@ def _finish(
     if inputs is not None:
         full = spec.wants_full()
         output_text = as_text(result) if result is not _NO_RESULT else None
+
+        # Redaction runs first: before the hash, before the detectors, before anything
+        # reaches memory or disk. `redaction.apply` returns None when the redactor failed,
+        # and a dropped payload is the correct outcome then -- recording it unredacted
+        # would defeat the reason the redactor exists.
+        redactor = spec.redactor if spec.redactor is not None else runtime.redactor
+        dropped: list[str] = []
+        if redactor is not None:
+            scrubbed: dict[str, str] = {}
+            for name, text in inputs.items():
+                safe = redaction.apply(text, redactor)
+                if safe is None:
+                    dropped.append(name)
+                else:
+                    scrubbed[name] = safe
+            inputs = scrubbed
+            if output_text is not None:
+                output_text = redaction.apply(output_text, redactor)
+                if output_text is None:
+                    dropped.append("output")
+
         if inputs or output_text is not None:
             io = {}
             if inputs:
@@ -189,6 +211,10 @@ def _finish(
             if output_text is not None:
                 io["output"] = fingerprint(output_text, full=full)
             signals = run_detectors(inputs, output_text, runtime.detectors)
+
+        if dropped:
+            # Say so rather than leaving a silent hole where a payload should be.
+            signals["redaction_failed"] = sorted(dropped)
 
     # A validator's verdict outranks a heuristic: the user knows what correct looks like.
     reason = _validate(spec, result) if exc is None and result is not _NO_RESULT else None
@@ -242,6 +268,7 @@ def webR_node(
     capture: bool | tuple[str, ...] | None = None,
     capture_full: bool | None = None,
     check: Callable[[Any], Any] | None = None,
+    redact: redaction.Redactor | None = None,
 ) -> F | Callable[[F], F]:
     """Trace every call to this callable as a node in the web.
 
@@ -271,6 +298,9 @@ def webR_node(
         check: A validator run on the return value. Return `True` to pass; return `False`,
             `None`, or a string reason to mark the node **suspect**. It never raises and
             never changes the returned value: a hallucination is a call that succeeded.
+        redact: Scrub this node's payloads before anything is recorded. Overrides the
+            process-wide redactor. If it raises, the payload is **dropped**, not stored
+            unredacted, and `redaction_failed` is recorded in the node's signals.
     """
     # Attributes are copied once here, not per call: the caller's dict must not be able
     # to mutate records that have already been handed to the buffer.
@@ -284,6 +314,7 @@ def webR_node(
             capture=capture,
             capture_full=capture_full,
             check=check,
+            redactor=redact,
             param_names=_parameter_names(func),
         )
 
