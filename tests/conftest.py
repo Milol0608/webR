@@ -4,9 +4,42 @@
 
 from __future__ import annotations
 
+import pytest
+
+import webr
+from webr.buffer import TraceBuffer
 from webr.records import NodeRecord, NodeStatus, next_seq
 
 TRACE = "0" * 32
+
+
+@pytest.fixture
+def buffer() -> TraceBuffer:
+    """A fresh buffer for one test, with the process-wide state restored afterwards.
+
+    Tracing state is global by design, so tests must not leak it into each other.
+    """
+    original = webr.get_buffer()
+    fresh = webr.configure(capacity=1_000, pinned_capacity=100)
+    webr.enable()
+    try:
+        yield fresh
+    finally:
+        webr.set_buffer(original)
+        webr.enable()
+
+
+def by_name(buffer: TraceBuffer, name: str) -> NodeRecord:
+    """The single recorded node with this name; fails loudly if that is not true."""
+    matches = [r for r in buffer.records() if r.name == name]
+    if len(matches) != 1:
+        raise AssertionError(f"expected exactly one node named {name!r}, got {len(matches)}")
+    return matches[0]
+
+
+def all_named(buffer: TraceBuffer, name: str) -> list[NodeRecord]:
+    """Every recorded node with this name, in invocation order."""
+    return [r for r in buffer.records() if r.name == name]
 
 
 def make_record(
