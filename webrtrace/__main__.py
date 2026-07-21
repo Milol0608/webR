@@ -17,6 +17,7 @@ import json
 import sys
 from pathlib import Path
 
+from .collapse import collapse_by_agent
 from .graph import graph_from_jsonl
 from .render import render, render_failures
 
@@ -32,6 +33,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show only the chains leading to failed or suspect nodes",
     )
+    parser.add_argument(
+        "--collapse",
+        action="store_true",
+        help="aggregate repeated invocations of an agent into a single node",
+    )
     parser.add_argument("--json", action="store_true", help="emit the raw graph document")
     parser.add_argument(
         "--width", type=int, default=32, help="node name column width (default: 32)"
@@ -43,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     document = graph_from_jsonl(args.path)
+    if args.collapse:
+        # Failure chains are computed on the raw document below, since a collapsed node
+        # has no single error to report.
+        document = collapse_by_agent(document)
 
     if args.json:
         json.dump(document, sys.stdout, indent=2, default=str)

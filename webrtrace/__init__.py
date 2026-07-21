@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from ._ids import new_node_id, new_trace_id
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
+from .collapse import collapse_by_agent
 from .decorator import submit, webR_node
 from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector, Payloads
 from .fingerprint import fingerprint
@@ -91,6 +92,7 @@ __all__ = [
     "TraceBuffer",
     "__version__",
     "clear_marks",
+    "collapse_by_agent",
     "common_secrets",
     "configure",
     "disable",

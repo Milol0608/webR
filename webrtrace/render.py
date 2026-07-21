@@ -64,8 +64,25 @@ def _describe(node: dict[str, Any], width: int) -> str:
     # marker rather than overwriting the status.
     taint = " *" if node.get("tainted") else "  "
     name = node.get("name", "<unnamed>")
+    calls = node.get("calls")
+    if calls and calls > 1:
+        name = f"{name} x{calls}"
     padded = name.ljust(width)[:width] if width else name
     line = f"{mark}{taint} {padded}  {format_duration(node.get('duration_ns', 0)):>8}"
+
+    # Collapsed nodes summarise many invocations, so the counts matter more than any one
+    # of them; an aggregate hiding a single failure among forty successes is useless.
+    if calls:
+        parts = []
+        if node.get("errors"):
+            parts.append(f"{node['errors']} err")
+        if node.get("suspects"):
+            parts.append(f"{node['suspects']} suspect")
+        if node.get("max_duration_ns"):
+            parts.append(f"max {format_duration(node['max_duration_ns'])}")
+        if parts:
+            line += f"  ({', '.join(parts)})"
+        return line.rstrip()
 
     error = node.get("error")
     if error:
@@ -144,6 +161,8 @@ def render_summary(document: dict[str, Any]) -> str:
         f"{stats.get('edges', 0)} edges",
         f"{len(document.get('traces', []))} trace(s)",
     ]
+    if document.get("collapsed"):
+        parts.insert(0, f"collapsed from {stats.get('collapsed_from', 0)} invocations")
     for status in ("ok", "error", "suspect"):
         if statuses.get(status):
             parts.append(f"{statuses[status]} {status}")
