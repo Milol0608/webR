@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "webr"
+version = "0.0.1"
+description = "Causality tracing for multi-agent AI systems: find the node that broke the chain."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Emilio Briones", email = "eabriones@miners.utep.edu" }]
+keywords = [
+    "observability",
+    "tracing",
+    "llm",
+    "agents",
+    "multi-agent",
+    "hallucination",
+    "debugging",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+
+# Deliberately empty. webR is a debugging dependency; it must never drag
+# third-party packages into a user's environment. See docs/adr/0001.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/Milol0608/webR"
+Issues = "https://github.com/Milol0608/webR/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webr"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
