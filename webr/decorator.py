@@ -6,14 +6,14 @@ Design constraints, in priority order:
 
 1. **Invisible to program behaviour.** Exceptions are recorded and re-raised unchanged,
    including `BaseException` subclasses such as `asyncio.CancelledError` -- a cancelled
-   agent is a fact worth recording, not an error to swallow. Nothing here alters a return
-   value, a signature, or a traceback.
-2. **No I/O and no serialization on the hot path.** The wrapper reads a context variable,
-   takes two clock samples, builds one frozen record, and appends it. Everything
-   expensive happens later, on the writer thread.
-3. **Shape decided once.** Whether a callable is sync, async, a generator, or an async
-   generator is determined at *decoration* time. Inspecting the function on every call
-   would be the most avoidable overhead imaginable.
+   agent is a fact worth recording, not an error to swallow. A failing validator does not
+   raise. Nothing here alters a return value, a signature, or a traceback.
+2. **Everything decided once.** Whether a callable is sync, async, a generator, or an
+   async generator, what its parameters are called, and what it captures are all resolved
+   at *decoration* time. Re-deriving any of that per call would be pure waste.
+3. **Bounded work per call.** A context lookup, two clock samples, one pass over any
+   string payload (ADR 0002), one frozen record, one append. No I/O, no locks held across
+   user code.
 """
 
 from __future__ import annotations
@@ -24,18 +24,43 @@ import inspect
 import traceback
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
+from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Any, TypeVar
 
 from . import runtime
+from .detectors import is_suspect, run_detectors
+from .fingerprint import as_text, fingerprint
 from .propagation import NodeRef, get_propagator, new_root
 from .records import ErrorInfo, NodeRecord, NodeStatus, next_seq, now_unix_ns
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+#: Sentinel distinguishing "returned None" from "never produced a value".
+_NO_RESULT = object()
+
 #: Rendered tracebacks are capped so a deep recursive failure cannot produce a record
 #: larger than the buffer it lives in.
 MAX_TRACEBACK_CHARS = 8_192
+
+
+@dataclass(frozen=True, slots=True)
+class _Spec:
+    """Everything decided once, at decoration time, so no call pays to rediscover it."""
+
+    name: str
+    attributes: dict[str, Any] | None
+    capture: bool | tuple[str, ...] | None
+    capture_full: bool | None
+    check: Callable[[Any], Any] | None
+    param_names: tuple[str, ...]
+
+    def wants_capture(self) -> bool:
+        """Per-node setting wins; otherwise follow the process-wide default."""
+        return runtime.capture if self.capture is None else bool(self.capture)
+
+    def wants_full(self) -> bool:
+        return runtime.capture_full if self.capture_full is None else self.capture_full
 
 
 def _error_info(exc: BaseException) -> ErrorInfo:
@@ -53,6 +78,57 @@ def _error_info(exc: BaseException) -> ErrorInfo:
     return ErrorInfo(type=type(exc).__name__, message=str(exc), traceback=rendered)
 
 
+def _collect_inputs(spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:
+    """Map string-valued arguments to their parameter names.
+
+    Parameter names are zipped against positional arguments rather than resolved through
+    `inspect.signature().bind()`, which costs tens of microseconds per call -- more than
+    everything else in the wrapper combined.
+    """
+    selected = spec.capture if isinstance(spec.capture, tuple) else None
+    inputs: dict[str, str] = {}
+
+    # strict=False is deliberate: a call may pass fewer positional arguments than the
+    # signature declares (defaults), or more (*args), and neither is webR's business.
+    for name, value in zip(spec.param_names, args, strict=False):
+        if selected is not None and name not in selected:
+            continue
+        text = as_text(value)
+        if text is not None:
+            inputs[name] = text
+
+    for name, value in kwargs.items():
+        if selected is not None and name not in selected:
+            continue
+        text = as_text(value)
+        if text is not None:
+            inputs[name] = text
+
+    return inputs
+
+
+def _validate(spec: _Spec, result: Any) -> str | None:
+    """Run the user's validator. Returns a reason if the output looks wrong.
+
+    A failing check never raises. That is the entire point: the call *succeeded*, the
+    value is being returned to the caller, and webR's job is to note that it looks wrong
+    without changing what the program does.
+    """
+    if spec.check is None:
+        return None
+    try:
+        verdict = spec.check(result)
+    except Exception as exc:  # a broken validator must not break the traced run
+        return f"check raised {type(exc).__name__}: {exc}"
+    if verdict is True:
+        return None
+    if isinstance(verdict, str):
+        return verdict
+    if not verdict:
+        return "check returned a falsy value"
+    return None
+
+
 def _open(name: str) -> NodeRef:
     """Derive a node from whatever is currently executing, without making it current."""
     parent = get_propagator().current()
@@ -65,25 +141,53 @@ def _finish(
     started_unix_ns: int,
     started_ns: int,
     exc: BaseException | None,
-    attributes: dict[str, Any] | None,
+    spec: _Spec,
+    inputs: dict[str, str] | None = None,
+    result: Any = _NO_RESULT,
 ) -> None:
-    """Close a node: stop the clock, restore context, record, and pin if it failed.
+    """Close a node: stop the clock, analyse, record, and propagate failure upward.
 
     `token` is None for the generator wrappers, which attach and detach around each
-    resumption instead of holding the context for the node's whole lifetime.
+    resumption rather than holding the context for the node's whole lifetime.
     """
     duration_ns = perf_counter_ns() - started_ns
     if token is not None:
         get_propagator().detach(token)
 
-    buffer = runtime.get_buffer()
-    if exc is None:
-        status, error = NodeStatus.OK, None
+    io: dict[str, Any] | None = None
+    signals: dict[str, Any] = {}
+
+    if inputs is not None:
+        full = spec.wants_full()
+        output_text = as_text(result) if result is not _NO_RESULT else None
+        if inputs or output_text is not None:
+            io = {}
+            if inputs:
+                io["inputs"] = {name: fingerprint(text, full=full) for name, text in inputs.items()}
+            if output_text is not None:
+                io["output"] = fingerprint(output_text, full=full)
+            signals = run_detectors(inputs, output_text, runtime.detectors)
+
+    # A validator's verdict outranks a heuristic: the user knows what correct looks like.
+    reason = _validate(spec, result) if exc is None and result is not _NO_RESULT else None
+    if reason is None and signals:
+        reason = is_suspect(signals, runtime.suspect_signals)
+
+    if exc is not None:
+        status: NodeStatus = NodeStatus.ERROR
+        error = _error_info(exc)
+    elif reason is not None:
+        status, error = NodeStatus.SUSPECT, None
+        signals["suspect"] = reason
     else:
-        status, error = NodeStatus.ERROR, _error_info(exc)
-        # The ancestor chain is the causal story -- "orchestrator -> planner -> boom".
-        # Pin it now: those parents are still executing and do not exist in the buffer
-        # yet, so this is the only moment their ids are knowable.
+        status, error = NodeStatus.OK, None
+
+    buffer = runtime.get_buffer()
+    if status is not NodeStatus.OK:
+        # Everything above consumed this node's output, so it is downstream of a problem.
+        ref.taint_ancestors()
+        # Pin the causal chain now: those parents are still executing and do not exist in
+        # the buffer yet, so this is the only moment their ids are knowable.
         buffer.pin(ref.chain_ids())
 
     parent = ref.parent
@@ -99,7 +203,10 @@ def _finish(
             duration_ns=duration_ns,
             depth=ref.depth,
             error=error,
-            attributes=attributes if attributes is not None else {},
+            tainted=ref.state.tainted,
+            attributes=spec.attributes if spec.attributes is not None else {},
+            io=io,
+            signals=signals or None,
         )
     )
 
@@ -110,6 +217,9 @@ def webR_node(
     *,
     name: str | None = None,
     attributes: dict[str, Any] | None = None,
+    capture: bool | tuple[str, ...] | None = None,
+    capture_full: bool | None = None,
+    check: Callable[[Any], Any] | None = None,
 ) -> F | Callable[[F], F]:
     """Trace every call to this callable as a node in the web.
 
@@ -118,32 +228,50 @@ def webR_node(
         @webR_node
         async def planner(task: str) -> str: ...
 
-        @webR_node(name="planner.v2", attributes={"model": "opus-4.8"})
-        async def planner_v2(task: str) -> str: ...
+        @webR_node(capture=("prompt",), check=lambda out: out.strip().startswith("{"))
+        async def extractor(prompt: str, retries: int = 0) -> str: ...
 
     Args:
         name: Node name in the web. Defaults to the callable's qualified name.
         attributes: Static metadata attached to every record this callable produces.
             Copied once at decoration time and then shared by reference across records,
             which is safe because records are frozen and webR never mutates it.
+        capture: Whether to fingerprint string payloads. `None` follows the process-wide
+            setting, `False` disables it for this node, `True` captures every string
+            argument, and a tuple of parameter names narrows it to those.
+        capture_full: Store payload text rather than a fingerprint. `None` follows the
+            process-wide setting. Bounded by `fingerprint.MAX_FULL_CHARS`, but still the
+            setting most likely to turn a trace file into a liability -- prompts contain
+            customer data.
+        check: A validator run on the return value. Return `True` to pass; return `False`,
+            `None`, or a string reason to mark the node **suspect**. It never raises and
+            never changes the returned value: a hallucination is a call that succeeded.
     """
-    # Copied once here, not per call: the caller's dict must not be able to mutate
-    # records that have already been handed to the buffer.
+    # Attributes are copied once here, not per call: the caller's dict must not be able
+    # to mutate records that have already been handed to the buffer.
     static_attributes = dict(attributes) if attributes else None
 
     def decorate(func: F) -> F:
         node_name = name or getattr(func, "__qualname__", None) or repr(func)
+        spec = _Spec(
+            name=node_name,
+            attributes=static_attributes,
+            capture=capture,
+            capture_full=capture_full,
+            check=check,
+            param_names=_parameter_names(func),
+        )
 
         # An async generator function is not a coroutine function, so it must be tested
         # first; otherwise it would fall through to the wrong wrapper.
         if inspect.isasyncgenfunction(func):
-            wrapper = _wrap_async_generator(func, node_name, static_attributes)
+            wrapper = _wrap_async_generator(func, spec)
         elif inspect.iscoroutinefunction(func):
-            wrapper = _wrap_async(func, node_name, static_attributes)
+            wrapper = _wrap_async(func, spec)
         elif inspect.isgeneratorfunction(func):
-            wrapper = _wrap_generator(func, node_name, static_attributes)
+            wrapper = _wrap_generator(func, spec)
         else:
-            wrapper = _wrap_sync(func, node_name, static_attributes)
+            wrapper = _wrap_sync(func, spec)
 
         wrapper.__webr_node__ = True
         wrapper.__webr_name__ = node_name
@@ -154,31 +282,45 @@ def webR_node(
     return decorate(fn)
 
 
-def _wrap_sync(func: Any, node_name: str, attributes: dict[str, Any] | None) -> Any:
+def _parameter_names(func: Any) -> tuple[str, ...]:
+    """Positional parameter names, resolved once.
+
+    A callable that refuses introspection -- some builtins and C extensions do -- simply
+    gets no named inputs rather than breaking decoration.
+    """
+    try:
+        return tuple(inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        return ()
+
+
+def _wrap_sync(func: Any, spec: _Spec) -> Any:
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not runtime.enabled:
             return func(*args, **kwargs)
-        ref = _open(node_name)
+        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
+        ref = _open(spec.name)
         token = get_propagator().attach(ref)
         started_unix, started = now_unix_ns(), perf_counter_ns()
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
-            _finish(ref, token, started_unix, started, exc, attributes)
+            _finish(ref, token, started_unix, started, exc, spec, inputs)
             raise
-        _finish(ref, token, started_unix, started, None, attributes)
+        _finish(ref, token, started_unix, started, None, spec, inputs, result)
         return result
 
     return wrapper
 
 
-def _wrap_async(func: Any, node_name: str, attributes: dict[str, Any] | None) -> Any:
+def _wrap_async(func: Any, spec: _Spec) -> Any:
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not runtime.enabled:
             return await func(*args, **kwargs)
-        ref = _open(node_name)
+        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
+        ref = _open(spec.name)
         token = get_propagator().attach(ref)
         started_unix, started = now_unix_ns(), perf_counter_ns()
         try:
@@ -186,21 +328,25 @@ def _wrap_async(func: Any, node_name: str, attributes: dict[str, Any] | None) ->
         except BaseException as exc:
             # Includes CancelledError: an agent killed by a timeout is exactly the kind
             # of silent disappearance this library exists to make visible.
-            _finish(ref, token, started_unix, started, exc, attributes)
+            _finish(ref, token, started_unix, started, exc, spec, inputs)
             raise
-        _finish(ref, token, started_unix, started, None, attributes)
+        _finish(ref, token, started_unix, started, None, spec, inputs, result)
         return result
 
     return wrapper
 
 
-def _wrap_generator(func: Any, node_name: str, attributes: dict[str, Any] | None) -> Any:
+def _wrap_generator(func: Any, spec: _Spec) -> Any:
     """Trace a generator across its whole lifetime, not just the call that creates it.
 
     Calling a generator function runs no user code -- the body executes on each `next()`.
     So the node spans from first resumption to exhaustion, and the context is attached
     around every resumption so that calls made *inside* the body see this node as their
     parent rather than whoever happened to be iterating.
+
+    Only inputs are captured. A generator has no single return value to fingerprint, and
+    accumulating every yielded item would reintroduce the unbounded retention the whole
+    design avoids.
 
     `GeneratorExit` is recorded as success, not failure. A consumer that `break`s out of
     a loop has abandoned the generator, which is ordinary control flow; reporting it as
@@ -216,8 +362,9 @@ def _wrap_generator(func: Any, node_name: str, attributes: dict[str, Any] | None
             return
 
         propagator = get_propagator()
+        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
         iterator = func(*args, **kwargs)
-        ref = _open(node_name)
+        ref = _open(spec.name)
         started_unix, started = now_unix_ns(), perf_counter_ns()
         sent: Any = None
         try:
@@ -232,26 +379,27 @@ def _wrap_generator(func: Any, node_name: str, attributes: dict[str, Any] | None
                 sent = yield item
         except GeneratorExit:
             iterator.close()
-            _finish(ref, None, started_unix, started, None, attributes)
+            _finish(ref, None, started_unix, started, None, spec, inputs)
             raise
         except BaseException as exc:
             iterator.close()
-            _finish(ref, None, started_unix, started, exc, attributes)
+            _finish(ref, None, started_unix, started, exc, spec, inputs)
             raise
-        _finish(ref, None, started_unix, started, None, attributes)
+        _finish(ref, None, started_unix, started, None, spec, inputs)
 
     return wrapper
 
 
-def _wrap_async_generator(func: Any, node_name: str, attributes: dict[str, Any] | None) -> Any:
+def _wrap_async_generator(func: Any, spec: _Spec) -> Any:
     """Async-generator counterpart of `_wrap_generator`, with the same semantics."""
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         propagator = get_propagator()
-        iterator = func(*args, **kwargs)
         tracing = runtime.enabled
-        ref = _open(node_name) if tracing else None
+        inputs = _collect_inputs(spec, args, kwargs) if tracing and spec.wants_capture() else None
+        iterator = func(*args, **kwargs)
+        ref = _open(spec.name) if tracing else None
         started_unix, started = now_unix_ns(), perf_counter_ns()
         sent: Any = None
         try:
@@ -270,15 +418,15 @@ def _wrap_async_generator(func: Any, node_name: str, attributes: dict[str, Any] 
         except GeneratorExit:
             await iterator.aclose()
             if ref is not None:
-                _finish(ref, None, started_unix, started, None, attributes)
+                _finish(ref, None, started_unix, started, None, spec, inputs)
             raise
         except BaseException as exc:
             await iterator.aclose()
             if ref is not None:
-                _finish(ref, None, started_unix, started, exc, attributes)
+                _finish(ref, None, started_unix, started, exc, spec, inputs)
             raise
         if ref is not None:
-            _finish(ref, None, started_unix, started, None, attributes)
+            _finish(ref, None, started_unix, started, None, spec, inputs)
 
     return wrapper
 
