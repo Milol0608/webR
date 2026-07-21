@@ -100,6 +100,10 @@ class NodeRecord:
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready mapping. Keys with no value are omitted to keep JSONL lines small."""
         out: dict[str, Any] = {
+            # A JSONL stream carries both nodes and edges, so every line says which it
+            # is. Inferring the type from which keys happen to be present would break the
+            # moment either shape grew a field.
+            "record": "node",
             "trace_id": self.trace_id,
             "node_id": self.node_id,
             "parent_id": self.parent_id,
@@ -138,8 +142,13 @@ class EdgeRecord:
     seq: int
     label: str | None = None
 
+    #: Edges are never pinned on their own: an edge matters because of the nodes it
+    #: joins, and those carry their own retention.
+    is_interesting = False
+
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
+            "record": "edge",
             "trace_id": self.trace_id,
             "kind": self.kind.value,
             "src_id": self.src_id,
