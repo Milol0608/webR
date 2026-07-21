@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import sys
 import threading
 from collections import deque
 from pathlib import Path
@@ -69,6 +70,8 @@ class JsonlWriter:
         self._written = 0
         self._rotations = 0
         self._bytes_in_file = 0
+        self._write_errors = 0
+        self._warned = False
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self._path.open("a", encoding="utf-8", newline="\n")
@@ -95,7 +98,11 @@ class JsonlWriter:
             self._wake.set()
 
     def flush(self) -> None:
-        """Drain everything queued right now and push it to the OS. Blocks the caller."""
+        """Drain everything queued right now and push it to the OS. Blocks the caller.
+
+        Never raises. A caller reaching for `flush()` is usually mid-incident; handing
+        them a second, unrelated failure to debug would be actively hostile.
+        """
         self._drain()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -113,6 +120,12 @@ class JsonlWriter:
                 self._file.close()
 
     def stats(self) -> dict[str, Any]:
+        """Counters for what reached disk and what did not.
+
+        `dropped` covers every record that never made it: queue overflow when the writer
+        could not keep up, and batches lost to a write failure. `write_errors` isolates
+        the second cause.
+        """
         with self._lock:
             return {
                 "path": str(self._path),
@@ -120,6 +133,7 @@ class JsonlWriter:
                 "dropped": self._dropped,
                 "pending": len(self._pending),
                 "rotations": self._rotations,
+                "write_errors": self._write_errors,
             }
 
     # -- writer thread -------------------------------------------------------------
@@ -132,7 +146,10 @@ class JsonlWriter:
             # after the flag is set and no record queued before `stop` is lost.
             with self._lock:
                 stopping = self._stopping
-            self._drain()
+            try:
+                self._drain()
+            except Exception as exc:  # last line of defence; _drain handles its own
+                self._record_failure(0, exc)
             if stopping:
                 return
 
@@ -147,16 +164,57 @@ class JsonlWriter:
         if closed:
             return
 
-        payload = "".join(f"{_encode(record)}\n" for record in batch)
+        try:
+            payload = "".join(f"{_encode(record)}\n" for record in batch)
+        except Exception as exc:
+            # Encoding runs user-supplied __repr__ via `default=str`. A batch that cannot
+            # be encoded is lost, but it must not take the writer down with it.
+            self._record_failure(len(batch), exc)
+            return
+
         with self._lock:
             if self._file.closed:
                 return
-            self._file.write(payload)
-            self._file.flush()
+            try:
+                self._file.write(payload)
+                self._file.flush()
+            except Exception as exc:
+                # A full disk, a revoked handle, a network mount that went away. The
+                # batch is gone; the writer is not. Dropping the thread here would end
+                # the trace silently, mid-incident, which is exactly when it is needed.
+                self._record_failure(len(batch), exc, locked=True)
+                return
             self._written += len(batch)
             self._bytes_in_file += len(payload.encode("utf-8"))
             if self._bytes_in_file >= self._rotate_bytes:
                 self._rotate()
+
+    def _record_failure(self, lost: int, exc: Exception, *, locked: bool = False) -> None:
+        """Count a failed batch and say so once, loudly, on stderr.
+
+        Once, because a failing disk fails every batch, and a scrolling wall of identical
+        errors is its own kind of silence. The running total lives in `stats()`.
+        """
+        if locked:
+            first = self._count_failure(lost)
+        else:
+            with self._lock:
+                first = self._count_failure(lost)
+
+        if first:
+            print(
+                f"webR: trace writing to {self._path} failed ({type(exc).__name__}: {exc}). "
+                "Tracing continues in memory; records from here on are not reaching disk. "
+                "See writer.stats() for the running count.",
+                file=sys.stderr,
+            )
+
+    def _count_failure(self, lost: int) -> bool:
+        """Update the counters, returning whether this is the first failure. Lock held."""
+        self._write_errors += 1
+        self._dropped += lost
+        first, self._warned = not self._warned, True
+        return first
 
     def _rotate(self) -> None:
         """Start a new file. Caller holds the lock."""
