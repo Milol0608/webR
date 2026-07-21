@@ -39,7 +39,7 @@ To keep that defensible:
   constant.
 - **Detection is skipped entirely when there is nothing to capture**, so a node that takes
   and returns non-string values pays only a type check.
-- **Capture is switchable** globally (`webr.set_capture`) and per node
+- **Capture is switchable** globally (`webrtrace.set_capture`) and per node
   (`@webR_node(capture=False)`), so the zero-overhead path remains available to anyone who
   needs it.
 

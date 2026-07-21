@@ -8,20 +8,20 @@ import json
 
 import pytest
 
-import webr
-from webr.graph import SCHEMA_VERSION, export_graph, graph_from_jsonl, load_jsonl, write_graph
+import webrtrace
+from webrtrace.graph import SCHEMA_VERSION, export_graph, graph_from_jsonl, load_jsonl, write_graph
 
 
 def build_a_web():
-    @webr.webR_node(name="extractor")
+    @webrtrace.webR_node(name="extractor")
     def extractor():
         return 1
 
-    @webr.webR_node(name="planner")
+    @webrtrace.webR_node(name="planner")
     def planner():
         return extractor()
 
-    @webr.webR_node(name="orchestrator")
+    @webrtrace.webR_node(name="orchestrator")
     def orchestrator():
         return planner()
 
@@ -33,7 +33,7 @@ def test_graph_has_nodes_edges_and_provenance(buffer):
     document = export_graph(buffer)
 
     assert document["schema"] == SCHEMA_VERSION
-    assert document["webr_version"] == webr.__version__
+    assert document["webr_version"] == webrtrace.__version__
     assert len(document["nodes"]) == 3
     assert len(document["edges"]) == 2
     assert len(document["traces"]) == 1
@@ -59,7 +59,7 @@ def test_roots_are_the_nodes_with_no_caller(buffer):
 
 
 def test_status_counts_are_reported(buffer):
-    @webr.webR_node(name="boom")
+    @webrtrace.webR_node(name="boom")
     def boom():
         raise RuntimeError("nope")
 
@@ -74,19 +74,19 @@ def test_status_counts_are_reported(buffer):
 def test_dangling_edges_are_flagged_not_hidden(buffer):
     # An edge whose parent was evicted is still a real edge. The document reports it and
     # marks it, so a visualization can show the gap honestly.
-    small = webr.configure(capacity=2, pinned_capacity=2)
+    small = webrtrace.configure(capacity=2, pinned_capacity=2)
 
-    @webr.webR_node(name="child")
+    @webrtrace.webR_node(name="child")
     def child():
         return 1
 
-    @webr.webR_node(name="parent")
+    @webrtrace.webR_node(name="parent")
     def parent():
         return child()
 
     parent()
 
-    @webr.webR_node(name="filler")
+    @webrtrace.webR_node(name="filler")
     def filler():
         return None
 
@@ -97,7 +97,7 @@ def test_dangling_edges_are_flagged_not_hidden(buffer):
     dangling = [edge for edge in document["edges"] if edge.get("dangling")]
     assert document["stats"]["dangling_edges"] == len(dangling)
     assert document["stats"]["dropped"] > 0
-    webr.configure()
+    webrtrace.configure()
 
 
 def test_write_graph_produces_readable_json(buffer, tmp_path):
@@ -110,12 +110,12 @@ def test_write_graph_produces_readable_json(buffer, tmp_path):
 
 def test_graph_from_jsonl_round_trips_a_run(buffer, tmp_path):
     path = tmp_path / "run.jsonl"
-    webr.start_writer(path, flush_interval=0.05)
+    webrtrace.start_writer(path, flush_interval=0.05)
     try:
         build_a_web()
-        webr.flush()
+        webrtrace.flush()
     finally:
-        webr.stop_writer()
+        webrtrace.stop_writer()
 
     from_disk = graph_from_jsonl(path)
     from_memory = export_graph(buffer)
@@ -128,13 +128,13 @@ def test_graph_from_jsonl_round_trips_a_run(buffer, tmp_path):
 def test_graph_from_jsonl_reads_a_whole_directory_in_sequence_order(buffer, tmp_path):
     # Rotation splits a run across files; the reassembled web must not care.
     directory = tmp_path / "traces"
-    webr.start_writer(directory / "run.jsonl", flush_interval=60.0, rotate_bytes=200)
+    webrtrace.start_writer(directory / "run.jsonl", flush_interval=60.0, rotate_bytes=200)
     try:
         for _ in range(10):
             build_a_web()
-        webr.flush()
+        webrtrace.flush()
     finally:
-        webr.stop_writer()
+        webrtrace.stop_writer()
 
     document = graph_from_jsonl(directory)
     assert document["stats"]["files_read"] > 1

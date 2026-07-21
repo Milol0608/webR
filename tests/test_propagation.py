@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
-from webr.propagation import (
+from webrtrace.propagation import (
     ContextVarPropagator,
     NodeRef,
     Propagator,

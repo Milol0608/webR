@@ -10,28 +10,28 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from conftest import by_name
 
-import webr
-from webr import Link, webR_node
-from webr.graph import export_graph
-from webr.links import MAX_MARKS
+import webrtrace
+from webrtrace import Link, webR_node
+from webrtrace.graph import export_graph
+from webrtrace.links import MAX_MARKS
 
 
 @pytest.fixture(autouse=True)
 def clean_marks():
-    webr.clear_marks()
+    webrtrace.clear_marks()
     yield
-    webr.clear_marks()
+    webrtrace.clear_marks()
 
 
 def test_marking_and_linking_records_an_edge(buffer):
     # The motivating case: producer and consumer never call each other.
     @webR_node(name="planner")
     def planner():
-        return webr.mark(["step one", "step two"], "plan")
+        return webrtrace.mark(["step one", "step two"], "plan")
 
     @webR_node(name="executor")
     def executor(plan):
-        assert webr.link(plan) is True
+        assert webrtrace.link(plan) is True
         return "done"
 
     plan = planner()
@@ -50,7 +50,7 @@ def test_mark_returns_the_value_unchanged(buffer):
 
     @webR_node(name="producer")
     def producer():
-        return webr.mark(payload)
+        return webrtrace.mark(payload)
 
     result = producer()
     assert result is payload
@@ -62,11 +62,11 @@ def test_linking_is_identity_based_not_equality_based(buffer):
     # that never existed, which is worse than recording no edge at all.
     @webR_node(name="producer")
     def producer():
-        return webr.mark(["same"])
+        return webrtrace.mark(["same"])
 
     @webR_node(name="consumer")
     def consumer(value):
-        return webr.link(value)
+        return webrtrace.link(value)
 
     producer()
     assert consumer(["same"]) is False
@@ -76,22 +76,22 @@ def test_linking_is_identity_based_not_equality_based(buffer):
 def test_an_unmarked_value_records_nothing_and_does_not_raise(buffer):
     @webR_node(name="consumer")
     def consumer(value):
-        return webr.link(value)
+        return webrtrace.link(value)
 
     assert consumer("never marked") is False
     assert buffer.edges() == []
 
 
 def test_linking_outside_a_traced_call_is_a_no_op(buffer):
-    assert webr.link("anything") is False
-    assert webr.origin() is None
+    assert webrtrace.link("anything") is False
+    assert webrtrace.origin() is None
 
 
 def test_a_node_does_not_link_to_itself(buffer):
     @webR_node(name="agent")
     def agent():
-        value = webr.mark([1, 2, 3])
-        return webr.link(value)
+        value = webrtrace.mark([1, 2, 3])
+        return webrtrace.link(value)
 
     assert agent() is False
     assert buffer.edges() == []
@@ -100,11 +100,11 @@ def test_a_node_does_not_link_to_itself(buffer):
 def test_a_label_at_link_time_overrides_the_mark_label(buffer):
     @webR_node(name="producer")
     def producer():
-        return webr.mark([1], "original")
+        return webrtrace.mark([1], "original")
 
     @webR_node(name="consumer")
     def consumer(value):
-        webr.link(value, "at-consumption")
+        webrtrace.link(value, "at-consumption")
 
     consumer(producer())
     assert buffer.edges()[0].label == "at-consumption"
@@ -113,11 +113,11 @@ def test_a_label_at_link_time_overrides_the_mark_label(buffer):
 def test_one_value_can_fan_out_to_several_consumers(buffer):
     @webR_node(name="producer")
     def producer():
-        return webr.mark([1])
+        return webrtrace.mark([1])
 
     @webR_node(name="consumer")
     def consumer(value):
-        webr.link(value)
+        webrtrace.link(value)
 
     plan = producer()
     for _ in range(3):
@@ -134,11 +134,11 @@ def test_a_token_links_across_a_thread_boundary(buffer):
     # somewhere the producer's context never reaches.
     @webR_node(name="producer")
     def producer():
-        return "payload", webr.origin("queued")
+        return "payload", webrtrace.origin("queued")
 
     @webR_node(name="consumer")
     def consumer(payload, token):
-        webr.link(token)
+        webrtrace.link(token)
 
     payload, token = producer()
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -152,7 +152,7 @@ def test_a_token_links_across_a_thread_boundary(buffer):
 def test_a_token_survives_serialization(buffer):
     @webR_node(name="producer")
     def producer():
-        return webr.origin("plan")
+        return webrtrace.origin("plan")
 
     token = producer()
     restored = Link.from_dict(token.to_dict())
@@ -166,11 +166,11 @@ def test_edges_may_cross_traces(buffer):
     # them, which is exactly what makes it worth recording.
     @webR_node(name="producer")
     def producer():
-        return webr.origin()
+        return webrtrace.origin()
 
     @webR_node(name="consumer")
     def consumer(token):
-        webr.link(token)
+        webrtrace.link(token)
 
     token = producer()
     consumer(token)
@@ -184,12 +184,12 @@ def test_async_agents_can_link(buffer):
     @webR_node(name="producer")
     async def producer():
         await asyncio.sleep(0)
-        return webr.mark(["plan"])
+        return webrtrace.mark(["plan"])
 
     @webR_node(name="consumer")
     async def consumer(plan):
         await asyncio.sleep(0)
-        webr.link(plan)
+        webrtrace.link(plan)
 
     async def main():
         plan = await producer()
@@ -208,23 +208,23 @@ def test_the_mark_registry_is_bounded(buffer):
     @webR_node(name="producer")
     def producer():
         for index in range(MAX_MARKS + 500):
-            webr.mark([index])
+            webrtrace.mark([index])
 
     producer()
-    assert webr.mark_count() == MAX_MARKS
+    assert webrtrace.mark_count() == MAX_MARKS
 
 
 def test_evicted_marks_stop_linking_rather_than_linking_wrongly(buffer):
     @webR_node(name="producer")
     def producer():
-        first = webr.mark(["first"])
+        first = webrtrace.mark(["first"])
         for index in range(MAX_MARKS + 10):
-            webr.mark([index])
+            webrtrace.mark([index])
         return first
 
     @webR_node(name="consumer")
     def consumer(value):
-        return webr.link(value)
+        return webrtrace.link(value)
 
     assert consumer(producer()) is False
 
@@ -232,12 +232,12 @@ def test_evicted_marks_stop_linking_rather_than_linking_wrongly(buffer):
 def test_clear_marks_releases_everything(buffer):
     @webR_node(name="producer")
     def producer():
-        webr.mark([1])
+        webrtrace.mark([1])
 
     producer()
-    assert webr.mark_count() == 1
-    webr.clear_marks()
-    assert webr.mark_count() == 0
+    assert webrtrace.mark_count() == 1
+    webrtrace.clear_marks()
+    assert webrtrace.mark_count() == 0
 
 
 # --- the graph document ------------------------------------------------------------
@@ -246,11 +246,11 @@ def test_clear_marks_releases_everything(buffer):
 def test_sends_edges_appear_in_the_graph_alongside_call_edges(buffer):
     @webR_node(name="planner")
     def planner():
-        return webr.mark(["plan"], "plan")
+        return webrtrace.mark(["plan"], "plan")
 
     @webR_node(name="executor")
     def executor(plan):
-        webr.link(plan)
+        webrtrace.link(plan)
 
     @webR_node(name="orchestrator")
     def orchestrator():
@@ -271,35 +271,35 @@ def test_sends_edges_round_trip_through_jsonl(buffer, tmp_path):
 
     @webR_node(name="planner")
     def planner():
-        return webr.mark(["plan"], "plan")
+        return webrtrace.mark(["plan"], "plan")
 
     @webR_node(name="executor")
     def executor(plan):
-        webr.link(plan)
+        webrtrace.link(plan)
 
-    webr.start_writer(path, flush_interval=0.05)
+    webrtrace.start_writer(path, flush_interval=0.05)
     try:
         executor(planner())
-        webr.flush()
+        webrtrace.flush()
     finally:
-        webr.stop_writer()
+        webrtrace.stop_writer()
 
-    document = webr.graph_from_jsonl(path)
+    document = webrtrace.graph_from_jsonl(path)
     assert document["stats"]["sends_edges"] == 1
     assert document["stats"]["nodes"] == 2
 
 
 def test_a_dangling_sends_edge_is_flagged(buffer):
     # The consumer's node was evicted; the edge is still real and is reported as such.
-    small = webr.configure(capacity=2, pinned_capacity=2)
+    small = webrtrace.configure(capacity=2, pinned_capacity=2)
 
     @webR_node(name="producer")
     def producer():
-        return webr.mark(["plan"])
+        return webrtrace.mark(["plan"])
 
     @webR_node(name="consumer")
     def consumer(plan):
-        webr.link(plan)
+        webrtrace.link(plan)
 
     consumer(producer())
 
@@ -313,4 +313,4 @@ def test_a_dangling_sends_edge_is_flagged(buffer):
     document = export_graph(small)
     sends = [edge for edge in document["edges"] if edge["kind"] == "sends"]
     assert sends[0]["dangling"] is True
-    webr.configure()
+    webrtrace.configure()

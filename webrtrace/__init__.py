@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """webR -- causality tracing for multi-agent AI systems.
 
-    from webr import webR_node
+    from webrtrace import webR_node
 
     @webR_node
     async def planner(task: str) -> str:

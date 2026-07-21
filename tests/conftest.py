@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-import webr
-from webr.buffer import TraceBuffer
-from webr.records import NodeRecord, NodeStatus, next_seq
+import webrtrace
+from webrtrace.buffer import TraceBuffer
+from webrtrace.records import NodeRecord, NodeStatus, next_seq
 
 TRACE = "0" * 32
 
@@ -19,21 +19,21 @@ def buffer() -> TraceBuffer:
 
     Tracing state is global by design, so tests must not leak it into each other.
     """
-    original = webr.get_buffer()
-    fresh = webr.configure(capacity=1_000, pinned_capacity=100)
+    original = webrtrace.get_buffer()
+    fresh = webrtrace.configure(capacity=1_000, pinned_capacity=100)
     _reset_process_state()
     try:
         yield fresh
     finally:
-        webr.set_buffer(original)
+        webrtrace.set_buffer(original)
         _reset_process_state()
 
 
 def _reset_process_state() -> None:
-    webr.enable()
-    webr.set_capture(True, full=False)
-    webr.set_detectors(*webr.DEFAULT_DETECTORS)
-    webr.set_suspect_signals(*webr.DEFAULT_SUSPECT_SIGNALS)
+    webrtrace.enable()
+    webrtrace.set_capture(True, full=False)
+    webrtrace.set_detectors(*webrtrace.DEFAULT_DETECTORS)
+    webrtrace.set_suspect_signals(*webrtrace.DEFAULT_SUSPECT_SIGNALS)
 
 
 def by_name(buffer: TraceBuffer, name: str) -> NodeRecord:

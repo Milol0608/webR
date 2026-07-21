@@ -10,9 +10,9 @@ import time
 import pytest
 from conftest import make_record
 
-import webr
-from webr.records import NodeStatus
-from webr.writer import JsonlWriter
+import webrtrace
+from webrtrace.records import NodeStatus
+from webrtrace.writer import JsonlWriter
 
 
 @pytest.fixture
@@ -152,21 +152,21 @@ def test_unserializable_attributes_do_not_crash_the_writer(writer_path):
 def test_traced_calls_reach_the_jsonl_file(buffer, tmp_path):
     path = tmp_path / "run.jsonl"
 
-    @webr.webR_node(name="child")
+    @webrtrace.webR_node(name="child")
     def child():
         return 1
 
-    @webr.webR_node(name="parent")
+    @webrtrace.webR_node(name="parent")
     def parent():
         return child()
 
-    webr.start_writer(path, flush_interval=0.05)
+    webrtrace.start_writer(path, flush_interval=0.05)
     try:
         parent()
-        webr.flush()
+        webrtrace.flush()
         lines = read_lines(path)
     finally:
-        webr.stop_writer()
+        webrtrace.stop_writer()
 
     names = {line["name"] for line in lines}
     assert names == {"parent", "child"}
@@ -176,21 +176,21 @@ def test_evicted_nodes_still_survive_on_disk(tmp_path):
     # The point of streaming: the in-memory buffer is a bounded cache, and eviction from
     # it loses nothing permanently.
     path = tmp_path / "run.jsonl"
-    small = webr.configure(capacity=5, pinned_capacity=5)
+    small = webrtrace.configure(capacity=5, pinned_capacity=5)
 
-    @webr.webR_node(name="agent")
+    @webrtrace.webR_node(name="agent")
     def agent():
         return None
 
-    webr.start_writer(path, flush_interval=0.05)
+    webrtrace.start_writer(path, flush_interval=0.05)
     try:
         for _ in range(50):
             agent()
-        webr.flush()
+        webrtrace.flush()
         lines = read_lines(path)
     finally:
-        webr.stop_writer()
-        webr.configure()
+        webrtrace.stop_writer()
+        webrtrace.configure()
 
     assert len(small.records()) == 5
     assert len(lines) == 50
@@ -198,13 +198,13 @@ def test_evicted_nodes_still_survive_on_disk(tmp_path):
 
 def test_starting_a_second_writer_stops_the_first(tmp_path):
     first_path, second_path = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
-    first = webr.start_writer(first_path)
+    first = webrtrace.start_writer(first_path)
     try:
-        second = webr.start_writer(second_path)
-        assert webr.get_writer() is second
+        second = webrtrace.start_writer(second_path)
+        assert webrtrace.get_writer() is second
         assert first is not second
         # The displaced writer is closed, not left running against the same process.
         first.submit(make_record("late"))
         assert first.stats()["pending"] <= 1
     finally:
-        webr.stop_writer()
+        webrtrace.stop_writer()

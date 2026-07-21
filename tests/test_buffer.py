@@ -9,8 +9,8 @@ import threading
 import pytest
 from conftest import make_record
 
-from webr.buffer import TraceBuffer
-from webr.records import NodeStatus
+from webrtrace.buffer import TraceBuffer
+from webrtrace.records import NodeStatus
 
 
 def test_rejects_nonsense_capacity():

@@ -11,9 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from conftest import all_named, by_name
 
-import webr
-from webr import submit, webR_node
-from webr.records import NodeStatus
+import webrtrace
+from webrtrace import submit, webR_node
+from webrtrace.records import NodeStatus
 
 # --- the basics ------------------------------------------------------------------
 
@@ -172,11 +172,11 @@ def test_disabled_tracing_records_nothing_but_still_runs(buffer):
     def agent(x):
         return x + 1
 
-    webr.disable()
+    webrtrace.disable()
     try:
         assert agent(1) == 2
     finally:
-        webr.enable()
+        webrtrace.enable()
 
     assert buffer.records() == []
     assert agent(1) == 2
@@ -189,9 +189,9 @@ def test_tracing_can_be_toggled_mid_run(buffer):
     def agent():
         return None
 
-    webr.disable()
+    webrtrace.disable()
     agent()
-    webr.enable()
+    webrtrace.enable()
     agent()
 
     assert len(all_named(buffer, "agent")) == 1
@@ -291,7 +291,7 @@ def test_asyncio_to_thread_propagates_without_help(buffer):
 def test_failure_pins_its_ancestor_chain(buffer):
     # The parents are still executing when the child fails, so their records do not exist
     # yet. They must survive the flood of successes that follows.
-    small = webr.configure(capacity=5, pinned_capacity=50)
+    small = webrtrace.configure(capacity=5, pinned_capacity=50)
 
     @webR_node(name="boom")
     def boom():
@@ -431,13 +431,13 @@ def test_disabled_generators_still_behave_identically(buffer):
         received = yield 1
         yield received
 
-    webr.disable()
+    webrtrace.disable()
     try:
         gen = stream()
         assert next(gen) == 1
         assert gen.send("echo") == "echo"
         gen.close()
     finally:
-        webr.enable()
+        webrtrace.enable()
 
     assert buffer.records() == []

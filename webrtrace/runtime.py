@@ -8,7 +8,7 @@ of nanoseconds against an agent that is about to wait seconds on a network call 
 buys the ability to turn tracing on inside a live, misbehaving process without a restart.
 
 `enabled` is read directly by the decorator's hot path. Toggle it through `enable()` and
-`disable()`; rebinding it via `from webr.runtime import enabled` captures a snapshot and
+`disable()`; rebinding it via `from webrtrace.runtime import enabled` captures a snapshot and
 will not do what you want.
 """
 
@@ -143,7 +143,7 @@ def configure(
 
 
 def start_writer(
-    path: str | Path = "traces/webr.jsonl",
+    path: str | Path = "traces/webrtrace.jsonl",
     **options: Any,
 ) -> JsonlWriter:
     """Begin streaming completed nodes to a JSONL file.

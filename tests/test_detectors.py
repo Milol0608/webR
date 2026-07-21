@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from webr.detectors import (
+from webrtrace.detectors import (
     DEFAULT_SUSPECT_SIGNALS,
     MAX_CHARS_SCANNED,
     MAX_WORDS_SCANNED,
@@ -19,7 +19,7 @@ from webr.detectors import (
     is_suspect,
     run_detectors,
 )
-from webr.fingerprint import HEAD_TAIL_CHARS, MAX_FULL_CHARS, as_text, fingerprint
+from webrtrace.fingerprint import HEAD_TAIL_CHARS, MAX_FULL_CHARS, as_text, fingerprint
 
 
 def payloads(output, **inputs):

@@ -7,9 +7,9 @@ from __future__ import annotations
 import pytest
 from conftest import by_name
 
-import webr
-from webr import webR_node
-from webr.records import NodeStatus
+import webrtrace
+from webrtrace import webR_node
+from webrtrace.records import NodeStatus
 
 # --- capture -----------------------------------------------------------------------
 
@@ -65,7 +65,7 @@ def test_capture_can_be_disabled_process_wide(buffer):
     def agent(prompt):
         return "ok"
 
-    webr.set_capture(False)
+    webrtrace.set_capture(False)
     agent("secret")
 
     assert by_name(buffer, "agent").io is None
@@ -76,7 +76,7 @@ def test_per_node_setting_overrides_the_process_default(buffer):
     def agent(prompt):
         return "ok"
 
-    webr.set_capture(False)
+    webrtrace.set_capture(False)
     agent("still captured")
 
     assert by_name(buffer, "agent").io["inputs"]["prompt"]["text"] == "still captured"
@@ -158,7 +158,7 @@ def test_suspect_signals_are_configurable(buffer):
     def agent(source):
         return "The total is 8888."
 
-    webr.set_suspect_signals("novel_numbers")
+    webrtrace.set_suspect_signals("novel_numbers")
     agent("A report with 12 items.")
 
     assert by_name(buffer, "agent").status is NodeStatus.SUSPECT
@@ -169,7 +169,7 @@ def test_detectors_can_be_switched_off_while_capture_stays_on(buffer):
     def agent(prompt):
         return ""
 
-    webr.set_detectors()
+    webrtrace.set_detectors()
     agent("hello")
 
     record = by_name(buffer, "agent")
@@ -308,7 +308,7 @@ def test_a_failure_also_taints_its_ancestors(buffer):
 
 
 def test_tainted_nodes_survive_eviction(buffer):
-    small = webr.configure(capacity=3, pinned_capacity=50)
+    small = webrtrace.configure(capacity=3, pinned_capacity=50)
 
     @webR_node(name="bad", check=lambda out: False)
     def bad():
@@ -328,4 +328,4 @@ def test_tainted_nodes_survive_eviction(buffer):
 
     names = {r.name for r in small.records()}
     assert {"bad", "root"} <= names
-    webr.configure()
+    webrtrace.configure()

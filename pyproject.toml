@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "webr"
+name = "webrtrace"
 version = "0.0.1"
 description = "Causality tracing for multi-agent AI systems: find the node that broke the chain."
 readme = "README.md"
@@ -28,6 +28,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Debuggers",
     "Topic :: System :: Monitoring",
     "Typing :: Typed",
@@ -43,9 +44,10 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 [project.urls]
 Homepage = "https://github.com/Milol0608/webR"
 Issues = "https://github.com/Milol0608/webR/issues"
+Changelog = "https://github.com/Milol0608/webR/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["webr"]
+packages = ["webrtrace"]
 
 [tool.ruff]
 line-length = 100
@@ -56,4 +58,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Performance assertions are excluded by default. Wall-clock thresholds are meaningful on
+# a quiet machine and merely flaky on a shared CI runner; run them with `-m perf`.
+addopts = "-q -m 'not perf'"
+markers = ["perf: wall-clock overhead assertions; excluded from the default run"]

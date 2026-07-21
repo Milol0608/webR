@@ -77,7 +77,7 @@ class JsonlWriter:
         # Daemon, because a non-daemon thread would be joined *before* atexit handlers
         # run and this loop only stops when an atexit handler tells it to -- the
         # interpreter would hang on exit. The atexit hook below does the orderly drain.
-        self._thread = threading.Thread(target=self._run, name="webr-writer", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="webrtrace-writer", daemon=True)
         self._thread.start()
         atexit.register(self.stop)
 

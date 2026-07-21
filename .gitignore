@@ -22,7 +22,7 @@ env/
 htmlcov/
 
 # webR trace output
-*.webr.jsonl
+*.webrtrace.jsonl
 traces/
 
 # Editors / OS

@@ -22,14 +22,14 @@ Two ways to declare one:
 **Marking**, when producer and consumer share a process::
 
     plan = build()
-    webr.mark(plan)        # in the producer
+    webrtrace.mark(plan)        # in the producer
     ...
-    webr.link(plan)        # in the consumer -> edge producer -> consumer
+    webrtrace.link(plan)        # in the consumer -> edge producer -> consumer
 
 **Tokens**, when they do not -- a queue, a socket, another machine::
 
-    token = webr.origin()  # serializable; send it alongside the payload
-    webr.link(token)       # on the far side
+    token = webrtrace.origin()  # serializable; send it alongside the payload
+    webrtrace.link(token)       # on the far side
 
 Marking is keyed on object *identity*, and the registry holds a strong reference. That is
 deliberate: a live reference makes `id()` stable, closing the recycled-address hole that
@@ -94,7 +94,7 @@ def origin(label: str | None = None) -> Link | None:
 def mark(value: T, label: str | None = None) -> T:
     """Remember that this value came from the current node. Returns it unchanged.
 
-    Returning the value makes it usable inline (`return webr.mark(plan)`) without ever
+    Returning the value makes it usable inline (`return webrtrace.mark(plan)`) without ever
     altering what the function produces.
     """
     current = get_propagator().current()

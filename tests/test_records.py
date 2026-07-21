@@ -10,8 +10,8 @@ from dataclasses import replace
 import pytest
 from conftest import make_record
 
-from webr._ids import new_node_id, new_trace_id
-from webr.records import (
+from webrtrace._ids import new_node_id, new_trace_id
+from webrtrace.records import (
     EdgeKind,
     EdgeRecord,
     ErrorInfo,
