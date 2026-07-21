@@ -1,0 +1,68 @@
+name: Bug report
+description: Something webR does that it should not, or fails to do
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The rule webR must never break: **tracing must not change what the traced program
+        does.** If you hit an exception, a changed return value, or a new failure mode
+        caused by webR, say so up front — those are the highest priority.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest code that shows it. Examples in `examples/` are a good starting shape —
+        simulated agents with hard-coded outputs beat a real LLM call, since we cannot run
+        yours.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Trace output (optional)
+      description: >
+        `python -m webrtrace traces/bug.jsonl` output, or `webrtrace.render(...)`.
+        **Scrub it first** — prompts contain real data, and `capture_full=True` writes them
+        verbatim.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: webR version
+      placeholder: "0.1.0  (python -c \"import webrtrace; print(webrtrace.__version__)\")"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version and OS
+      placeholder: "3.12.4, Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: context
+    attributes:
+      label: Anything relevant here?
+      options:
+        - label: The traced code is async
+        - label: Threads or a ThreadPoolExecutor are involved
+        - label: "Multiple processes are involved (note: cross-process tracing is not implemented)"
+        - label: Generators or async generators are involved
+        - label: A JSONL writer was running
+        - label: Payload capture was disabled

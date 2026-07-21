@@ -1,0 +1,52 @@
+name: Feature request
+description: Something webR should be able to do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: webR has **zero runtime dependencies** and does no I/O on the hot
+        path, and both are deliberate. Proposals that require a new dependency or inline
+        network/model calls are very unlikely to be accepted in that form — but the
+        underlying problem may still be worth solving another way, so please open the issue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What could you not diagnose? Describe the debugging session that went badly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: A sketch of the API or behaviour, if you have one.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Decorator / instrumentation
+        - Detectors and signals
+        - Retention and memory
+        - Export, JSONL, or the graph document
+        - Rendering and the CLI
+        - Links and data-dependency edges
+        - Cross-process / distributed tracing
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This can be done with no new runtime dependencies
+        - label: This does no I/O and no network calls on the traced call's path
+        - label: Any memory it uses is bounded
