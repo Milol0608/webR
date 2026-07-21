@@ -15,9 +15,13 @@ fluent, plausible, correctly-formatted sentence that is simply false. Detecting 
 embeddings or a judge model. The `Detector` protocol is public so such a detector can be
 added later -- but not inline, for the reasons in ADR 0002.
 
-The highest-value check here is `novel_numbers`. When a summarizer invents a revenue
-figure or a date that appeared nowhere in its input, that is detectable lexically, in one
-pass, with no model at all. It is the single best signal-per-cycle in the file.
+The check with the clearest diagnostic value is `novel_numbers`. When a summarizer invents
+a revenue figure or a date that appeared nowhere in its input, that is detectable
+lexically, in one pass, with no model at all. Two limits on it, stated rather than
+measured away: inputs are joined and then sampled head-and-tail, so a figure that appears
+only in the unread middle will look fabricated when it is not (`detection_truncated` marks
+those nodes), and it fires legitimately on any node whose job is to produce a new number.
+That is why it is not in `DEFAULT_SUSPECT_SIGNALS`.
 """
 
 from __future__ import annotations

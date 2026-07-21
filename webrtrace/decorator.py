@@ -256,8 +256,11 @@ def webR_node(
     Args:
         name: Node name in the web. Defaults to the callable's qualified name.
         attributes: Static metadata attached to every record this callable produces.
-            Copied once at decoration time and then shared by reference across records,
-            which is safe because records are frozen and webR never mutates it.
+            Shallow-copied once at decoration time, then shared by reference across every
+            record from this callable. webR never mutates it, and the copy means later
+            changes to the caller's dict do not leak in. It does *not* make the contents
+            immutable: mutating a value inside `record.attributes` mutates it for every
+            record this callable has produced. Treat records as read-only.
         capture: Whether to fingerprint string payloads. `None` follows the process-wide
             setting, `False` disables it for this node, `True` captures every string
             argument, and a tuple of parameter names narrows it to those.
