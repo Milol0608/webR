@@ -20,7 +20,7 @@ from typing import Any
 
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector
-from .records import EdgeRecord, NodeRecord
+from .records import EdgeRecord, NodeOpen, NodeRecord
 from .redaction import Redactor
 from .writer import JsonlWriter
 
@@ -113,6 +113,17 @@ def emit_edge(edge: EdgeRecord) -> None:
     writer = _writer
     if writer is not None:
         writer.submit(edge)
+
+
+def emit_open(marker: NodeOpen) -> None:
+    """Record that a node has started, to the durable stream only.
+
+    Skipped entirely when no writer is running: hang detection is a question you ask of
+    the file after the fact, and the bounded in-memory buffer cannot answer it anyway.
+    """
+    writer = _writer
+    if writer is not None:
+        writer.submit(marker)
 
 
 def is_enabled() -> bool:

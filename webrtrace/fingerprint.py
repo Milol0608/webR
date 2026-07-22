@@ -63,13 +63,19 @@ def fingerprint(text: str, *, full: bool = False) -> dict[str, Any]:
 def as_text(value: Any) -> str | None:
     """Return the payload as text if it is one, else None.
 
-    Only `str` and `bytes` qualify (ADR 0002): they are immutable, so a fingerprint taken
-    now stays true, and they are what agents pass. Everything else is ignored rather than
-    coerced -- `repr()`-ing an arbitrary object into a trace is how tracing libraries end
-    up serializing a database connection.
+    Accepts `str` and `bytes` and their subclasses -- `enum.StrEnum` members, framework
+    string types like `markupsafe.Markup`, Pydantic constrained strings. An earlier
+    version used `type(value) is str`, which silently gave those *no* capture and *no*
+    detection, so a hallucination inside a `StrEnum`-typed field was invisible.
+
+    Subclasses are snapshotted to a plain `str`/`bytes` immediately (`str(value)`), which
+    is the point of ADR 0002: the fingerprint must reflect the value *now*, and a subclass
+    could be lazy or mutable. Everything that is not text is ignored rather than coerced --
+    `repr()`-ing an arbitrary object into a trace is how tracing libraries end up
+    serializing a database connection.
     """
-    if type(value) is str:
-        return value
-    if type(value) is bytes:
-        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return str(value)  # snapshot: a StrEnum/Markup becomes a plain, frozen str
+    if isinstance(value, bytes):
+        return bytes(value).decode("utf-8", "replace")
     return None

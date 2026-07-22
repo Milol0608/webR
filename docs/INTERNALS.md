@@ -262,7 +262,14 @@ Things that will bite whoever touches this next.
 - **Everything that renders an exception is defended.** `str(exc)` can raise. If you add
   error-handling code, keep it wrapped, or webR will start changing program behaviour.
 - **`stats()["dropped"]` covers two causes**: queue overflow and lost write batches.
-  `write_errors` isolates the second.
+  `write_errors` isolates the second. Both are persisted to the JSONL as periodic `meta`
+  lines, so an offline reader sees them too.
+- **`seq` is assigned at node *open*, not completion.** It lives on `NodeRef` and orders
+  nodes by invocation, as the docs promise. A terminal record and its `open` marker share
+  the same `seq` -- that is how a completed node supersedes its own start marker.
+- **A node that never finishes** leaves only an `open` marker (writer-only); the reader
+  renders it `running`. This is the sole reason `emit_open` exists, and it is skipped
+  entirely when no writer is active.
 - **Pinned records are not immortal.** The pinned store has its own ceiling and evicts the
   oldest when full, counting them in `pins_dropped`. "Never evicted by age" means exactly
   that and nothing more.

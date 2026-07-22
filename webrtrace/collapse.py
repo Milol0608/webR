@@ -37,36 +37,69 @@ def _worst(statuses: list[str]) -> str:
 
 
 def collapse_by_agent(document: dict[str, Any]) -> dict[str, Any]:
-    """Aggregate a graph document by node name, one node per agent per parent.
+    """Aggregate a graph document by agent, one node per agent per distinct parent.
 
-    Grouping is by `(parent agent name, own name)` rather than by name alone. Two agents
-    that happen to share a name but sit in different parts of the web stay distinct --
-    merging them would invent a relationship the run never had.
+    Grouping keys each node on `(the group its parent belongs to, its own name)`, computed
+    parents-first. That keeps invocations of one agent under one parent merged, while
+    keeping same-named agents under *different* parents separate.
+
+    An earlier version keyed on the parent's *name*. When two different parents shared a
+    name -- two `worker` nodes each calling `step` -- their children merged into one group
+    whose members had two different real parents, and the parent resolution then gave up
+    and set `parent_id = None`, detaching a failing subtree and promoting it to a root.
+    Keying on the parent's resolved group, not its name, makes that impossible: every group
+    has exactly one parent group by construction.
     """
     nodes = document.get("nodes", [])
     if not nodes:
-        return {**document, "nodes": [], "edges": [], "collapsed": True}
+        return {
+            **document,
+            "collapsed": True,
+            "nodes": [],
+            "edges": [],
+            "roots": [],
+            "stats": {**document.get("stats", {}), "collapsed_from": 0, "nodes": 0, "edges": 0},
+        }
 
-    by_id = {node["node_id"]: node for node in nodes}
+    by_id = {node["node_id"]: node for node in nodes if "node_id" in node}
 
-    def group_key(node: dict[str, Any]) -> tuple[str, str]:
-        parent = by_id.get(node.get("parent_id") or "")
-        return (parent["name"] if parent else "", node.get("name", "?"))
+    # Process parents before children so a node's parent already has a group id assigned.
+    ordered = sorted(nodes, key=lambda n: (n.get("depth", 0), n.get("seq", 0)))
 
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for node in nodes:
-        groups.setdefault(group_key(node), []).append(node)
+    representative: dict[str, str] = {}  # original node_id -> synthetic group id
+    parent_rep_of: dict[str, str | None] = {}  # group id -> its parent group id (or None)
+    group_of: dict[tuple[str | None, str], str] = {}  # (parent group, name) -> group id
+    members_of: dict[str, list[dict[str, Any]]] = {}
+    counter = 0
 
-    # Every original node maps to the synthetic node that now represents it, so edges can
-    # be rewritten without guessing.
-    representative: dict[str, str] = {}
+    for node in ordered:
+        node_id = node.get("node_id")
+        if node_id is None:
+            continue
+        parent_id = node.get("parent_id")
+        if parent_id is None or parent_id not in by_id:
+            # Genuine root, or a node whose parent was evicted -- either way it has no
+            # resolvable parent group. Evicted parents are kept distinct from real roots
+            # by tagging with the (unique) missing id so unrelated subtrees do not merge.
+            parent_rep: str | None = None if parent_id is None else f"evicted:{parent_id}"
+        else:
+            parent_rep = representative.get(parent_id)
+
+        key = (parent_rep, node.get("name", "?"))
+        synthetic_id = group_of.get(key)
+        if synthetic_id is None:
+            synthetic_id = f"agent-{counter:04d}"
+            counter += 1
+            group_of[key] = synthetic_id
+            members_of[synthetic_id] = []
+            # A parent group that is a real synthetic id becomes the collapsed parent; an
+            # evicted or absent parent leaves this group a root of the collapsed view.
+            parent_rep_of[synthetic_id] = parent_rep if parent_rep in members_of else None
+        representative[node_id] = synthetic_id
+        members_of[synthetic_id].append(node)
+
     collapsed_nodes: list[dict[str, Any]] = []
-
-    for index, (key, members) in enumerate(groups.items()):
-        synthetic_id = f"agent-{index:04d}"
-        for member in members:
-            representative[member["node_id"]] = synthetic_id
-
+    for synthetic_id, members in members_of.items():
         durations = [member.get("duration_ns", 0) for member in members]
         statuses = [member.get("status", "ok") for member in members]
         suspects = sum(1 for status in statuses if status == NodeStatus.SUSPECT.value)
@@ -75,7 +108,8 @@ def collapse_by_agent(document: dict[str, Any]) -> dict[str, Any]:
         collapsed_nodes.append(
             {
                 "node_id": synthetic_id,
-                "name": key[1],
+                "name": members[0].get("name", "?"),
+                "parent_id": parent_rep_of[synthetic_id],
                 "calls": len(members),
                 "status": _worst(statuses),
                 "duration_ns": sum(durations),
@@ -89,17 +123,6 @@ def collapse_by_agent(document: dict[str, Any]) -> dict[str, Any]:
                 "node_ids": [member["node_id"] for member in members],
             }
         )
-
-    # Parents resolve through the same mapping; a node whose parent was evicted keeps a
-    # parent_id that maps to nothing, which the renderer already treats as a root.
-    for collapsed, (_, members) in zip(collapsed_nodes, groups.items(), strict=True):
-        parent_ids = {
-            representative.get(member.get("parent_id") or "")
-            for member in members
-            if member.get("parent_id")
-        }
-        parent_ids.discard(None)
-        collapsed["parent_id"] = parent_ids.pop() if len(parent_ids) == 1 else None
 
     collapsed_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in document.get("edges", []):

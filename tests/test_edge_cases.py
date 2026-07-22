@@ -72,9 +72,15 @@ def test_a_deeply_nested_exception_traceback_is_capped(buffer):
     with pytest.raises(ValueError):
         deep(60)
 
-    for record in buffer.records():
-        if record.error is not None:
-            assert len(record.error.traceback) <= 8_192 + 64
+    errored = [r for r in buffer.records() if r.error is not None]
+    rendered = [r for r in errored if r.error.traceback is not None]
+
+    # Exactly one node renders the traceback -- the innermost to see the exception.
+    # Ancestors record type and message only; rendering at every level was quadratic.
+    assert len(errored) > 1
+    assert len(rendered) == 1
+    assert len(rendered[0].error.traceback) <= 8_192 + 64
+    assert all(r.error.type == "ValueError" for r in errored)
 
 
 # --- decoration forms ----------------------------------------------------------------
@@ -139,14 +145,17 @@ def test_a_builtin_can_be_traced(buffer):
     assert by_name(buffer, "builtin").status is NodeStatus.OK
 
 
-def test_double_decoration_produces_two_nested_nodes(buffer):
+def test_double_decoration_records_one_node_not_two(buffer):
+    # Stacking @webR_node on @webR_node must not double-count the call. First wins.
     @webR_node(name="outer")
     @webR_node(name="inner")
     def agent():
         return 1
 
     agent()
-    assert by_name(buffer, "inner").parent_id == by_name(buffer, "outer").node_id
+    records = buffer.records()
+    assert len(records) == 1
+    assert records[0].name == "inner"
 
 
 # --- generators under garbage collection ---------------------------------------------
@@ -366,18 +375,23 @@ def test_invalid_utf8_bytes_are_captured(buffer):
     assert by_name(buffer, "agent").io["output"]["len"] > 0
 
 
-def test_a_str_subclass_is_not_captured(buffer):
-    # Documented consequence of the exact `type(value) is str` check: a subclass may
-    # carry lazy or mutable behaviour, and fingerprinting it could be wrong or slow.
-    class Lazy(str):
-        pass
+def test_a_str_subclass_is_captured_as_a_plain_str(buffer):
+    # StrEnum members and framework string types (e.g. markupsafe.Markup) are str
+    # subclasses. They must be captured -- a hallucination inside one was previously
+    # invisible -- and snapshotted to a plain str so a lazy or mutable subclass cannot
+    # drift after the fingerprint is taken.
+    class Loud(str):
+        def __str__(self):
+            return "SNAPSHOT"
 
     @webR_node(name="agent")
     def agent(prompt):
         return "fine"
 
-    agent(Lazy("value"))
-    assert by_name(buffer, "agent").io.get("inputs") is None
+    agent(Loud("value"))
+    captured = by_name(buffer, "agent").io["inputs"]["prompt"]
+    assert captured["text"] == "SNAPSHOT"
+    assert type(captured["text"]) is str
 
 
 def test_an_attribute_value_that_cannot_be_serialized_is_survivable(buffer, tmp_path):
@@ -539,7 +553,11 @@ def test_concurrent_agents_with_a_writer_running_lose_nothing(buffer, tmp_path):
     finally:
         webrtrace.stop_writer()
 
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
-    assert len(lines) == 1_600
+    import json
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    # 1600 terminal records, plus an "open" marker each; assert on the terminal ones.
+    terminal = [r for r in records if r.get("record", "node") == "node"]
+    assert len(terminal) == 1_600
     assert writer.stats()["dropped"] == 0
     webrtrace.configure()

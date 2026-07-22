@@ -193,7 +193,10 @@ def test_evicted_nodes_still_survive_on_disk(tmp_path):
         webrtrace.configure()
 
     assert len(small.records()) == 5
-    assert len(lines) == 50
+    # The stream also carries an "open" marker per node (for hang detection), so count
+    # terminal node records rather than raw lines.
+    terminal = [line for line in lines if line.get("record", "node") == "node"]
+    assert len(terminal) == 50
 
 
 def test_starting_a_second_writer_stops_the_first(tmp_path):

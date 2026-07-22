@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ._ids import new_node_id, new_trace_id
+from .records import next_seq
 
 
 class NodeState:
@@ -56,6 +57,10 @@ class NodeRef:
     name: str
     depth: int = 0
     parent: NodeRef | None = None
+    # Assigned when the node is *opened*, so it orders nodes by invocation, not by
+    # completion. The record inherits it in `_finish`, and the open-event (for hang
+    # detection) shares it, so both lines for one node carry the same seq.
+    seq: int = field(default_factory=next_seq)
     # Excluded from equality and repr: it is incidental state, not part of identity.
     state: NodeState = field(default_factory=NodeState, compare=False, repr=False)
 
@@ -65,9 +70,15 @@ class NodeRef:
         Taint flows *up* the call tree because that is the direction data flows: a parent
         consumed whatever this node produced, so if this output is wrong, everything that
         used it is suspect too.
+
+        Stops at the first already-tainted ancestor. That is safe because this walk always
+        runs to the root, so a tainted node's own ancestors are necessarily tainted
+        already. Without the short-circuit, a deep chain where every node is suspect
+        re-walked the whole chain at every level -- quadratic in depth, on the failure
+        path.
         """
         node = self.parent
-        while node is not None:
+        while node is not None and not node.state.tainted:
             node.state.tainted = True
             node = node.parent
 
@@ -93,6 +104,17 @@ class NodeRef:
     def chain_ids(self) -> tuple[str, ...]:
         """`ancestor_ids`, but including this node, nearest first."""
         return (self.node_id, *self.ancestor_ids())
+
+    def iter_chain_ids(self) -> Iterator[str]:
+        """`chain_ids` lazily, so a consumer that can stop early does not pay for the rest.
+
+        `TraceBuffer.pin` stops at the first id it already knows about, which makes
+        pinning a deep failing chain amortized O(1) instead of O(depth) per node.
+        """
+        node: NodeRef | None = self
+        while node is not None:
+            yield node.node_id
+            node = node.parent
 
 
 def new_root(name: str) -> NodeRef:
@@ -225,6 +247,15 @@ def remote_parent(carrier: dict[str, str]) -> Iterator[NodeRef | None]:
     then the edge reads as dangling, which is honest rather than broken.
 
     An absent or malformed carrier is not an error: the block simply starts a new trace.
+
+    **Trust.** A carrier is an unauthenticated `traceparent` string, exactly as in W3C
+    Trace Context -- there is no signature, and webR cannot tell a genuine one from a
+    forged one. A carrier accepted from an untrusted source can therefore attribute local
+    work to any parent the sender names, and if that id happens to match a real local node
+    the fabricated edge will look genuine. Only adopt carriers from infrastructure you
+    control (your own queue, your own services). The cross-process depth of adopted work
+    is also relative to this process, not the remote one, since the remote depth is not
+    carried.
     """
     ref = _propagator.extract(carrier)
     if ref is None:

@@ -93,18 +93,28 @@ def _describe(node: dict[str, Any], width: int) -> str:
     return line.rstrip()
 
 
+#: Indent stops growing past this depth. Beyond it the indent would be pure whitespace --
+#: a depth-5000 chain rendered 38MB of it -- so deeper nodes carry an explicit `+N` marker
+#: instead. Bounds the output at O(nodes) rather than O(depth^2).
+MAX_INDENT_DEPTH = 30
+
+
 def render_tree(document: dict[str, Any], *, name_width: int = 32) -> str:
     """Render the call structure of a web, one line per node.
 
     Nodes whose parent is missing -- evicted, or written to a rotated file that was not
     read -- are rendered as roots rather than dropped. A tree that silently omits a
     subtree would be worse than one that shows it detached.
+
+    The walk is iterative. Recursion here died with a `RecursionError` at around depth
+    1000, on traces webR itself had recorded without trouble -- the renderer refusing to
+    show you a trace is a poor way to learn your agents recursed deeply.
     """
     nodes = document.get("nodes", [])
     if not nodes:
         return "(empty web)"
 
-    by_id = {node["node_id"]: node for node in nodes}
+    by_id = {node["node_id"]: node for node in nodes if "node_id" in node}
     children: dict[str, list[dict[str, Any]]] = {}
     roots: list[dict[str, Any]] = []
 
@@ -121,16 +131,29 @@ def render_tree(document: dict[str, Any], *, name_width: int = 32) -> str:
 
     lines: list[str] = []
 
-    def walk(node: dict[str, Any], prefix: str, is_last: bool, is_root: bool) -> None:
-        connector = "" if is_root else ("`- " if is_last else "|- ")
-        lines.append(f"{prefix}{connector}{_describe(node, name_width)}")
-        kids = children.get(node["node_id"], [])
-        child_prefix = prefix if is_root else prefix + ("   " if is_last else "|  ")
-        for index, child in enumerate(kids):
-            walk(child, child_prefix, index == len(kids) - 1, False)
+    def walk(root: dict[str, Any]) -> None:
+        # (node, prefix, is_last, is_root, depth); reversed pushes keep sibling order.
+        stack: list[tuple[dict[str, Any], str, bool, bool, int]] = [(root, "", True, True, 0)]
+        while stack:
+            node, prefix, is_last, is_root, depth = stack.pop()
+            connector = "" if is_root else ("`- " if is_last else "|- ")
+            marker = "" if depth <= MAX_INDENT_DEPTH else f"+{depth} "
+            lines.append(f"{prefix}{connector}{marker}{_describe(node, name_width)}")
+
+            kids = children.get(node.get("node_id"), ())
+            if not kids:
+                continue
+            if is_root:
+                child_prefix = prefix
+            elif depth <= MAX_INDENT_DEPTH:
+                child_prefix = prefix + ("   " if is_last else "|  ")
+            else:
+                child_prefix = prefix  # stop growing; the +N marker carries the depth
+            for index in range(len(kids) - 1, -1, -1):
+                stack.append((kids[index], child_prefix, index == len(kids) - 1, False, depth + 1))
 
     for root in roots:
-        walk(root, "", True, True)
+        walk(root)
 
     return "\n".join(lines)
 
@@ -182,23 +205,60 @@ def render(document: dict[str, Any], *, name_width: int = 32) -> str:
     return "\n".join(sections)
 
 
-def failure_chains(document: dict[str, Any]) -> list[list[dict[str, Any]]]:
-    """Root-to-failure paths, one per failed or suspect node.
+#: Most failure chains reported. A run where thousands of nodes are suspect produces
+#: thousands of near-identical chains -- unreadable, and before this cap it cost
+#: O(failures x depth): a 5MB document peaked at 1.6GB just building them.
+MAX_FAILURE_CHAINS = 50
+
+#: Longest single chain reported. A truncated chain keeps the end nearest the failure.
+MAX_CHAIN_LENGTH = 60
+
+
+def failure_chains(
+    document: dict[str, Any],
+    *,
+    limit: int = MAX_FAILURE_CHAINS,
+    max_length: int = MAX_CHAIN_LENGTH,
+) -> list[list[dict[str, Any]]]:
+    """Root-to-failure paths, one per failed or suspect node, deepest failure first.
 
     This is the answer to the question the library exists for: not "what went wrong" but
     "what was the chain of calls that led to the first thing that went wrong".
+
+    Both the number of chains and the length of each are bounded, because a deep run where
+    every node is suspect would otherwise materialise a quadratic number of node
+    references. Deepest-first ordering means that when the cap bites, what survives is the
+    *origin* of each failure rather than the nodes it merely propagated through.
     """
-    by_id = {node["node_id"]: node for node in document.get("nodes", [])}
-    chains = []
-    for node in document.get("nodes", []):
-        if node.get("status") not in ("error", "suspect"):
+    nodes = document.get("nodes", [])
+    by_id = {node["node_id"]: node for node in nodes if "node_id" in node}
+
+    failing = [node for node in nodes if node.get("status") in ("error", "suspect")]
+    failing.sort(key=lambda node: node.get("depth", 0), reverse=True)
+
+    chains: list[list[dict[str, Any]]] = []
+    covered: set[str] = set()
+
+    for node in failing:
+        if len(chains) >= limit:
+            break
+        # A failing node already inside a reported chain adds nothing: that chain already
+        # shows it, on the way to a deeper failure. Without this, a chain where every node
+        # is suspect produced N chains that were all prefixes of each other.
+        if node.get("node_id") in covered:
             continue
-        chain, current = [], node
+
+        chain: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = node
         seen: set[str] = set()
-        while current is not None and current["node_id"] not in seen:
-            seen.add(current["node_id"])
+        # `seen` also guards a cycle in a hand-built or corrupted document.
+        while current is not None and current.get("node_id") not in seen:
+            seen.add(current.get("node_id"))
             chain.append(current)
+            if len(chain) >= max_length:
+                break
             current = by_id.get(current.get("parent_id"))
+        covered |= seen
         chains.append(list(reversed(chain)))
     return chains
 

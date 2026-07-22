@@ -103,6 +103,21 @@ orchestrator is tainted but no node is `[ERR]` or `[SUS]`, something failed and 
 swallowed by a `try/except` in your own code. That is the most common shape of a silent
 failure, and it is invisible without the taint marker.
 
+### The process hung or was killed
+
+A node that never returns emits no terminal record — but if a writer was streaming, it
+left a start marker, so the stuck node shows up as `running`:
+
+```
+[...] * orchestrator
+`- [...]   vector_db_query        <-- running: started, never finished
+```
+
+`stats["running"]` counts them. This is the case a conventional tracer misses entirely: the
+one node that was actually stuck is the one that would otherwise be absent. Requires a
+writer (`start_writer(...)`) — without a durable stream there is nothing to read after the
+process dies.
+
 ### 3. If nothing is marked at all
 
 webR did not catch it, which narrows things usefully. Either:
@@ -184,6 +199,14 @@ webrtrace.link(Link.from_dict(message["webr"]))
 unmarked value, an evicted mark, or no active node. If your edges are missing, check that
 return value: silence there means the mark did not survive, usually because more than 2,048
 values were marked since.
+
+**`mark()`/`link()` only work on objects with a stable identity — containers, custom
+objects.** Strings, numbers, booleans, and `None` are *not* linkable this way: Python
+interns them, so `"done" is "done"` and `0 is 0` are `True` for values that different
+agents produced independently, and keying on that would invent edges between unrelated
+work. `mark()` on such a value returns it unchanged but records nothing. To link a string
+or a number, use a token instead — `origin()` on one side, `link(token)` on the other — so
+the connection rests on an explicit node id rather than a memory address.
 
 ---
 

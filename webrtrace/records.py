@@ -160,6 +160,46 @@ class EdgeRecord:
         return out
 
 
+@dataclass(frozen=True, slots=True)
+class NodeOpen:
+    """An 'I have started' marker, written to the durable stream when a node opens.
+
+    It exists for one failure mode: a node that never returns -- a hang, or a process
+    killed mid-call -- emits no `NodeRecord`, so without this it would be *absent* from
+    the trace, and the trace would point at whatever did finish. The open marker means a
+    hung node still appears, as `running`.
+
+    It goes only to the JSONL writer, never to the bounded in-memory buffer: hang
+    detection is a post-mortem question you ask of the durable file, and doubling the
+    buffer's churn to answer a question it cannot answer would be pure cost. At export,
+    an open marker with no matching terminal record becomes a `running` node; a terminal
+    record supersedes its open marker by sharing `node_id` and `seq`.
+    """
+
+    trace_id: str
+    node_id: str
+    parent_id: str | None
+    name: str
+    seq: int
+    started_unix_ns: int
+    depth: int = 0
+    # Never pinned or made urgent on its own; it is provisional until the node finishes.
+    is_interesting = False
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "record": "open",
+            "trace_id": self.trace_id,
+            "node_id": self.node_id,
+            "parent_id": self.parent_id,
+            "name": self.name,
+            "seq": self.seq,
+            "started_unix_ns": self.started_unix_ns,
+            "depth": self.depth,
+        }
+        return out
+
+
 def now_unix_ns() -> int:
     """Wall-clock timestamp, for correlating a web against external logs."""
     return time.time_ns()

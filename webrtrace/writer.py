@@ -72,6 +72,7 @@ class JsonlWriter:
         self._bytes_in_file = 0
         self._write_errors = 0
         self._warned = False
+        self._last_meta = (0, 0)
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self._path.open("a", encoding="utf-8", newline="\n")
@@ -113,11 +114,17 @@ class JsonlWriter:
             self._stopping = True
         self._wake.set()
         self._thread.join(timeout=timeout)
-        # Drain again in case the thread was killed by the timeout mid-cycle, then close.
+        # Drain again in case the thread was killed by the timeout mid-cycle, then write a
+        # final meta line so the total drop count is durable even if the last drops
+        # happened after the last successful batch, then close.
         self._drain()
         with self._lock:
+            self._write_meta_if_changed()
             if not self._file.closed:
                 self._file.close()
+        # Every writer registered an atexit handler; without this, each one ever created
+        # stays referenced (and alive) for the life of the process.
+        atexit.unregister(self.stop)
 
     def stats(self) -> dict[str, Any]:
         """Counters for what reached disk and what did not.
@@ -162,6 +169,9 @@ class JsonlWriter:
             closed = self._file.closed
 
         if closed:
+            # The batch is gone and nobody will write it. Count it, rather than letting a
+            # shutdown race make records vanish while `dropped` still reads zero.
+            self._record_failure(len(batch), RuntimeError("writer closed before drain"))
             return
 
         try:
@@ -174,6 +184,9 @@ class JsonlWriter:
 
         with self._lock:
             if self._file.closed:
+                self._record_failure(
+                    len(batch), RuntimeError("writer closed mid-drain"), locked=True
+                )
                 return
             try:
                 self._file.write(payload)
@@ -186,8 +199,32 @@ class JsonlWriter:
                 return
             self._written += len(batch)
             self._bytes_in_file += len(payload.encode("utf-8"))
+            self._write_meta_if_changed()
             if self._bytes_in_file >= self._rotate_bytes:
                 self._rotate()
+
+    def _write_meta_if_changed(self) -> None:
+        """Persist the running drop/error counts as a meta line when they move. Lock held.
+
+        Without this, a reader opening the file offline has no way to know the writer
+        dropped records -- the count lives only in the live `stats()` of a process that
+        may be gone. `graph_from_jsonl` reads these lines back so the exported document can
+        report `dropped` honestly instead of implying completeness it does not have.
+        """
+        current = (self._dropped, self._write_errors)
+        if current == self._last_meta or self._file.closed:
+            return
+        line = json.dumps(
+            {"record": "meta", "dropped": self._dropped, "write_errors": self._write_errors},
+            separators=(",", ":"),
+        )
+        try:
+            self._file.write(line + "\n")
+            self._file.flush()
+        except Exception:  # a meta line is best-effort; never let it break the writer
+            return
+        self._last_meta = current
+        self._bytes_in_file += len(line) + 1
 
     def _record_failure(self, lost: int, exc: Exception, *, locked: bool = False) -> None:
         """Count a failed batch and say so once, loudly, on stderr.

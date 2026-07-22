@@ -25,7 +25,7 @@ permanently -- the record is already on disk, and this becomes a cache for live 
 from __future__ import annotations
 
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterable
 
 from .records import EdgeRecord, NodeRecord
@@ -78,8 +78,9 @@ class TraceBuffer:
         self._pinned_order: deque[str] = deque()
         # Ids to retain when they arrive -- ancestors pinned while still executing.
         # Bounded like everything else here: a run that fails in a loop would otherwise
-        # accumulate ancestor ids forever. Insertion-ordered dict used as a FIFO set.
-        self._pin_requests: dict[str, None] = {}
+        # accumulate ancestor ids forever. An OrderedDict as a FIFO set, so evicting the
+        # oldest is O(1) via popitem(last=False).
+        self._pin_requests: OrderedDict[str, None] = OrderedDict()
         self._dropped = 0
         self._pins_dropped = 0
         # Explicit SENDS edges. Kept in their own ring: they are far rarer than nodes and
@@ -113,20 +114,29 @@ class TraceBuffer:
     def pin(self, node_ids: Iterable[str]) -> None:
         """Protect these nodes from age eviction, now and on arrival.
 
-        Called with a failing node's ancestor chain. Ids that are neither resident nor
-        yet created are remembered, so a parent still executing is retained when it
-        finishes.
+        Called with a failing node's ancestor chain, nearest first. Ids that are neither
+        resident nor yet created are remembered, so a parent still executing is retained
+        when it finishes.
+
+        **Stops at the first id already known.** Every pin walks to the root, so an id
+        that is already pinned or already requested had its own ancestors pinned by that
+        earlier walk. Pass a lazy iterator (`NodeRef.iter_chain_ids`) and a deep failing
+        chain costs O(1) amortized per node instead of O(depth).
         """
         with self._lock:
             for node_id in node_ids:
+                if node_id in self._pinned or node_id in self._pin_requests:
+                    return  # everything above this was pinned by an earlier walk
                 record = self._resident.get(node_id)
                 if record is not None:
                     self._retain(record)
                     continue
                 # Not here yet: remember the id so `append` retains it on arrival.
                 self._pin_requests[node_id] = None
-                while len(self._pin_requests) > self._pinned_capacity:
-                    self._pin_requests.pop(next(iter(self._pin_requests)))
+                if len(self._pin_requests) > self._pinned_capacity:
+                    # popitem(last=False) is O(1); popping via next(iter(...)) walked the
+                    # dict's deleted slots and degraded with capacity.
+                    self._pin_requests.popitem(last=False)
 
     def records(self) -> list[NodeRecord]:
         """Everything still retained, in invocation order."""

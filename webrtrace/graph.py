@@ -95,7 +95,20 @@ def export_graph(buffer: TraceBuffer | None = None) -> dict[str, Any]:
     target = buffer if buffer is not None else runtime.get_buffer()
     nodes = [record.to_dict() for record in target.records()]
     sends = [edge.to_dict() for edge in target.edges()]
-    return _build(nodes, sends, {"source": "buffer", **target.stats()})
+    source_stats: dict[str, Any] = {"source": "buffer", **target.stats()}
+
+    # If a writer is streaming, its drops are records that left the buffer and never
+    # reached disk. Fold them in so the document does not imply completeness the run did
+    # not have.
+    writer = runtime.get_writer()
+    if writer is not None:
+        writer_stats = writer.stats()
+        writer_dropped = writer_stats.get("dropped", 0)
+        if writer_dropped:
+            source_stats["writer_dropped"] = writer_dropped
+        if writer_stats.get("write_errors"):
+            source_stats["write_errors"] = writer_stats["write_errors"]
+    return _build(nodes, sends, source_stats)
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -141,7 +154,46 @@ def graph_from_jsonl(path: str | Path) -> dict[str, Any]:
     # is what they were, rather than refusing to read an older trace file.
     nodes = [entry for entry in entries if entry.get("record", "node") == "node"]
     sends = [entry for entry in entries if entry.get("record") == "edge"]
-    return _build(nodes, sends, {"source": "jsonl", "files_read": read})
+
+    # An "open" marker whose node has no terminal record is a node that started and never
+    # finished -- a hang, or a process killed mid-call. Surface it as `running` so the
+    # trace shows the node that was actually stuck rather than silently omitting it.
+    terminal_ids = {node["node_id"] for node in nodes if "node_id" in node}
+    running = 0
+    for entry in entries:
+        if entry.get("record") != "open" or entry.get("node_id") in terminal_ids:
+            continue
+        nodes.append(
+            {
+                "trace_id": entry.get("trace_id"),
+                "node_id": entry.get("node_id"),
+                "parent_id": entry.get("parent_id"),
+                "name": entry.get("name", "?"),
+                "seq": entry.get("seq", 0),
+                "status": "running",
+                "started_unix_ns": entry.get("started_unix_ns", 0),
+                "duration_ns": 0,
+                "depth": entry.get("depth", 0),
+            }
+        )
+        running += 1
+
+    nodes.sort(key=lambda node: node.get("seq", 0))
+    stats: dict[str, Any] = {"source": "jsonl", "files_read": read}
+    if running:
+        stats["running"] = running
+
+    # Meta lines carry the writer's running drop/error counts (monotonic), so a reader can
+    # tell the trace is incomplete instead of trusting a file that silently lost records.
+    dropped = max((e.get("dropped", 0) for e in entries if e.get("record") == "meta"), default=0)
+    write_errors = max(
+        (e.get("write_errors", 0) for e in entries if e.get("record") == "meta"), default=0
+    )
+    if dropped:
+        stats["dropped"] = dropped
+    if write_errors:
+        stats["write_errors"] = write_errors
+    return _build(nodes, sends, stats)
 
 
 def write_graph(path: str | Path, buffer: TraceBuffer | None = None, *, indent: int = 2) -> Path:

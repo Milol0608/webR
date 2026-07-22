@@ -21,9 +21,11 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
+import sys
 import traceback
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
+from contextvars import ContextVar
 from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Any, TypeVar
@@ -32,7 +34,7 @@ from . import redaction, runtime
 from .detectors import is_suspect, run_detectors
 from .fingerprint import as_text, fingerprint
 from .propagation import NodeRef, get_propagator, new_root
-from .records import ErrorInfo, NodeRecord, NodeStatus, next_seq, now_unix_ns
+from .records import ErrorInfo, NodeOpen, NodeRecord, NodeStatus, now_unix_ns
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -64,6 +66,33 @@ class _Spec:
         return runtime.capture_full if self.capture_full is None else self.capture_full
 
 
+#: Innermost stack frames kept when rendering a traceback. The frames nearest the raise
+#: are the ones worth having; a negative limit is what selects them.
+MAX_TRACEBACK_FRAMES = 40
+
+# The exception most recently rendered in this context. As one propagates up through many
+# traced frames, only the innermost renders it; the rest recognise it here and skip.
+#
+# A ContextVar rather than a set keyed on the exception: exceptions are **not**
+# weak-referenceable in CPython, so a WeakSet silently degrades to "always render" (which
+# is exactly the bug this replaced -- the optimisation looked correct and did nothing).
+# Identity comparison against a live object avoids both the id-reuse hazard of keying on
+# `id()` and the intrusion of setting an attribute on the user's exception. It retains one
+# exception per context, replaced by the next -- no more than `except` blocks already hold,
+# and per-task, so concurrent agents never interfere.
+_last_rendered: ContextVar[BaseException | None] = ContextVar(
+    "webrtrace_last_rendered_exception", default=None
+)
+
+
+def _first_sighting(exc: BaseException) -> bool:
+    """Whether this traced frame is the innermost one to see this exception."""
+    if _last_rendered.get() is exc:
+        return False
+    _last_rendered.set(exc)
+    return True
+
+
 def _error_info(exc: BaseException) -> ErrorInfo:
     """Render an exception to plain strings.
 
@@ -72,6 +101,13 @@ def _error_info(exc: BaseException) -> ErrorInfo:
     where the message is built on demand -- can raise while being rendered. If that
     escaped, webR would turn a recoverable error in the traced program into a different,
     unrecoverable one, which is the single thing this library must never do.
+
+    **The traceback is rendered once, by the innermost traced frame to see the
+    exception.** As it propagates up, each ancestor records the type and message but not
+    the traceback. Rendering at every level made a deep failure quadratic -- a depth-2000
+    failure took over two minutes, on precisely the path this library exists to record --
+    and it duplicated the same text onto every node in the chain, since the frames a
+    bounded render keeps are the innermost ones either way.
 
     The traceback is formatted rather than stored as frame objects: holding frames would
     keep every local in the failing stack alive for as long as the record sits in the
@@ -87,8 +123,15 @@ def _error_info(exc: BaseException) -> ErrorInfo:
     except Exception as render_failure:
         message = f"<{name}.__str__ raised {type(render_failure).__name__}>"
 
+    if not _first_sighting(exc):
+        return ErrorInfo(type=name, message=message, traceback=None)
+
     try:
-        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        rendered = "".join(
+            traceback.format_exception(
+                type(exc), exc, exc.__traceback__, limit=-MAX_TRACEBACK_FRAMES
+            )
+        )
     except Exception:
         # format_exception calls str() on the exception too, so it can fail the same way.
         rendered = None
@@ -158,6 +201,26 @@ def _open(name: str) -> NodeRef:
     return parent.child(name) if parent is not None else new_root(name)
 
 
+_warned_tracing_failure = False
+
+
+def _warn_tracing_failure(exc: BaseException) -> None:
+    """Announce, once, that webR's own machinery faulted and was contained.
+
+    A fault here is swallowed rather than propagated -- tracing must never change what the
+    traced program does -- but silence would hide a broken sink or propagator, so the
+    first one is reported on stderr.
+    """
+    global _warned_tracing_failure
+    if not _warned_tracing_failure:
+        _warned_tracing_failure = True
+        print(
+            f"webR: internal tracing error, suppressed to protect the traced program "
+            f"({type(exc).__name__}: {exc}). Records may be missing from here on.",
+            file=sys.stderr,
+        )
+
+
 def _finish(
     ref: NodeRef,
     token: Any | None,
@@ -170,12 +233,39 @@ def _finish(
 ) -> None:
     """Close a node: stop the clock, analyse, record, and propagate failure upward.
 
+    **This function never raises.** It runs on both the success and the exception path of
+    every traced call, so a fault in webR's own machinery -- a user-supplied `Propagator`,
+    a swapped `TraceBuffer`, a broken detector -- must be contained here. Letting one
+    escape would either mask the traced program's exception or inject a new one, which is
+    the single thing this library must never do. Context detachment is done first and
+    separately, so a later failure cannot leak the contextvar.
+
     `token` is None for the generator wrappers, which attach and detach around each
     resumption rather than holding the context for the node's whole lifetime.
     """
     duration_ns = perf_counter_ns() - started_ns
     if token is not None:
-        get_propagator().detach(token)
+        try:
+            get_propagator().detach(token)
+        except BaseException as detach_exc:  # a leaked contextvar is bad; a raise is worse
+            _warn_tracing_failure(detach_exc)
+    try:
+        _record_node(ref, started_unix_ns, duration_ns, exc, spec, inputs, result)
+    except BaseException as record_exc:
+        _warn_tracing_failure(record_exc)
+
+
+def _record_node(
+    ref: NodeRef,
+    started_unix_ns: int,
+    duration_ns: int,
+    exc: BaseException | None,
+    spec: _Spec,
+    inputs: dict[str, str] | None,
+    result: Any,
+) -> None:
+    """Build and emit the record. May raise; `_finish` contains it."""
+    redactor = spec.redactor if spec.redactor is not None else runtime.redactor
 
     io: dict[str, Any] | None = None
     signals: dict[str, Any] = {}
@@ -186,9 +276,7 @@ def _finish(
 
         # Redaction runs first: before the hash, before the detectors, before anything
         # reaches memory or disk. `redaction.apply` returns None when the redactor failed,
-        # and a dropped payload is the correct outcome then -- recording it unredacted
-        # would defeat the reason the redactor exists.
-        redactor = spec.redactor if spec.redactor is not None else runtime.redactor
+        # and a dropped payload is the correct outcome then.
         dropped: list[str] = []
         if redactor is not None:
             scrubbed: dict[str, str] = {}
@@ -223,7 +311,10 @@ def _finish(
 
     if exc is not None:
         status: NodeStatus = NodeStatus.ERROR
-        error = _error_info(exc)
+        # An exception message and traceback are payloads too, and a provider SDK echoing
+        # the failing request into the message ("401 for api_key=sk-...") is ordinary, not
+        # exotic. Scrub them on the same terms as any other captured text.
+        error = _redact_error(_error_info(exc), redactor)
     elif reason is not None:
         status, error = NodeStatus.SUSPECT, None
         signals["suspect"] = reason
@@ -235,8 +326,9 @@ def _finish(
         # Everything above consumed this node's output, so it is downstream of a problem.
         ref.taint_ancestors()
         # Pin the causal chain now: those parents are still executing and do not exist in
-        # the buffer yet, so this is the only moment their ids are knowable.
-        buffer.pin(ref.chain_ids())
+        # the buffer yet, so this is the only moment their ids are knowable. Lazy, so pin
+        # can stop at the first id it already knows rather than walking to the root.
+        buffer.pin(ref.iter_chain_ids())
 
     parent = ref.parent
     runtime.emit(
@@ -245,7 +337,7 @@ def _finish(
             node_id=ref.node_id,
             parent_id=parent.node_id if parent is not None else None,
             name=ref.name,
-            seq=next_seq(),
+            seq=ref.seq,  # assigned at open, so ordering reflects invocation not completion
             status=status,
             started_unix_ns=started_unix_ns,
             duration_ns=duration_ns,
@@ -256,6 +348,22 @@ def _finish(
             io=io,
             signals=signals or None,
         )
+    )
+
+
+def _redact_error(error: ErrorInfo, redactor: redaction.Redactor | None) -> ErrorInfo:
+    """Scrub an exception's message and traceback, failing closed like every payload."""
+    if redactor is None:
+        return error
+    message = redaction.apply(error.message, redactor)
+    traceback_text = error.traceback
+    if traceback_text is not None:
+        traceback_text = redaction.apply(traceback_text, redactor)
+    return ErrorInfo(
+        type=error.type,
+        # None means the redactor failed; drop the text rather than risk leaking it.
+        message=message if message is not None else "[redaction failed]",
+        traceback=traceback_text,
     )
 
 
@@ -307,6 +415,11 @@ def webR_node(
     static_attributes = dict(attributes) if attributes else None
 
     def decorate(func: F) -> F:
+        if getattr(func, "__webr_node__", False):
+            # Already traced. Stacking @webR_node on @webR_node would record every call
+            # twice as two nested nodes with the same name; first decoration wins.
+            return func
+
         node_name = name or getattr(func, "__qualname__", None) or repr(func)
         spec = _Spec(
             name=node_name,
@@ -365,15 +478,50 @@ def _parameter_names(func: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _begin(spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Set up tracing for one call: collect inputs, open the node, make it current.
+
+    **Never raises.** Returns `(ref, token, inputs, started_unix, started)`, or None if
+    any of that faulted -- in which case the caller runs the function untraced rather than
+    letting webR's own failure surface in the traced program. `attach` is last, so a
+    failure cannot leave the contextvar attached with no one to detach it.
+    """
+    try:
+        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
+        ref = _open(spec.name)
+        token = get_propagator().attach(ref)
+        started_unix = now_unix_ns()
+        # A start marker to the durable stream, so a node that never returns (a hang, a
+        # killed process) still appears -- as `running` -- instead of vanishing and
+        # letting the trace blame whatever did finish. Writer-only, and a no-op when no
+        # writer is running.
+        parent = ref.parent
+        runtime.emit_open(
+            NodeOpen(
+                trace_id=ref.trace_id,
+                node_id=ref.node_id,
+                parent_id=parent.node_id if parent is not None else None,
+                name=ref.name,
+                seq=ref.seq,
+                started_unix_ns=started_unix,
+                depth=ref.depth,
+            )
+        )
+    except BaseException as exc:
+        _warn_tracing_failure(exc)
+        return None
+    return ref, token, inputs, started_unix, perf_counter_ns()
+
+
 def _wrap_sync(func: Any, spec: _Spec) -> Any:
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not runtime.enabled:
             return func(*args, **kwargs)
-        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
-        ref = _open(spec.name)
-        token = get_propagator().attach(ref)
-        started_unix, started = now_unix_ns(), perf_counter_ns()
+        began = _begin(spec, args, kwargs)
+        if began is None:
+            return func(*args, **kwargs)
+        ref, token, inputs, started_unix, started = began
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
@@ -390,10 +538,10 @@ def _wrap_async(func: Any, spec: _Spec) -> Any:
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not runtime.enabled:
             return await func(*args, **kwargs)
-        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
-        ref = _open(spec.name)
-        token = get_propagator().attach(ref)
-        started_unix, started = now_unix_ns(), perf_counter_ns()
+        began = _begin(spec, args, kwargs)
+        if began is None:
+            return await func(*args, **kwargs)
+        ref, token, inputs, started_unix, started = began
         try:
             result = await func(*args, **kwargs)
         except BaseException as exc:
