@@ -41,6 +41,47 @@ First public release.
   node per agent with call counts, summed and worst-case durations, and a status rollup in
   which the worst outcome wins, so a single failure among forty successes is never hidden.
 
+### Fixed before release — multi-agent break-it review
+
+Five adversarial agents (concurrency, resource exhaustion, API abuse, data integrity,
+portability) attacked the package with runnable reproductions. Regression tests live in
+`tests/test_breakit_findings.py` and `tests/test_hang_and_order.py`.
+
+**Tracing could change the traced program**
+- A faulting `Propagator` or swapped `TraceBuffer` could mask the program's own exception,
+  inject a new one, or stop the function body running. All tracing machinery is now
+  contained; a fault is reported once on stderr and never propagates.
+- Exception messages and tracebacks bypassed the redactor entirely, so a provider SDK
+  echoing `api_key=sk-...` into an error wrote it to disk verbatim.
+- `str`/`bytes` subclasses (`enum.StrEnum`, `markupsafe.Markup`) silently received no
+  capture and no detection.
+- Stacking `@webR_node` twice recorded every call as two nodes.
+
+**The trace could lie**
+- **A hung or killed node was invisible.** It emitted no record at all, so the trace showed
+  only what finished and pointed at the wrong node. An open-marker is now written to the
+  durable stream and such nodes appear as `running`.
+- Writer drops never reached the exported document; a lost error read as a clean run.
+- `mark()`/`link()` fabricated data-dependency edges between unrelated agents, because
+  CPython interns `"done"` and `0` so identity comparison succeeded across them.
+- `collapse_by_agent` detached a failing subtree and promoted it to a phantom root when two
+  parents shared a name.
+- `seq` was completion order while documented and used as invocation order.
+
+**Performance cliffs on the failure path**
+- A deep traced failure was O(depth²): rendering the full traceback at every unwind level
+  made a depth-2000 failure take **145 seconds**. The traceback is now rendered once, by
+  the innermost frame to see the exception — **21.6ms**, and taint/pin short-circuit.
+- `failure_chains` was O(N²): a 5MB document peaked at **1.6GB**. Chains are now bounded,
+  deduplicated, and deepest-first so the origin survives the cap.
+- `render_tree` recursed and raised `RecursionError` at ~depth 1000 on traces webR itself
+  had recorded, and emitted 38MB of whitespace at depth 5000. It is iterative and the
+  indent is capped.
+- The mark registry was bounded in entries, not bytes: 2,048 × 1MB payloads retained
+  **2.05GB**. A byte budget now caps it (measured 2050MB → 66MB).
+- A shutdown race discarded whole batches while `dropped` still read zero; each writer also
+  leaked an `atexit` handler for the life of the process.
+
 ### Fixed before release
 
 Found by an independent adversarial review of the package, and kept as regression tests in
