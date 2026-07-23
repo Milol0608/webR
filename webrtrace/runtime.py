@@ -14,6 +14,7 @@ will not do what you want.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector
 from .records import EdgeRecord, NodeOpen, NodeRecord
 from .redaction import Redactor
 from .writer import JsonlWriter
+
+#: No handler is installed here -- that is the application's decision.
+logger = logging.getLogger("webrtrace")
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
@@ -59,7 +63,8 @@ capture_text: bool = _env_flag("WEBR_CAPTURE_TEXT", True)
 #: Detectors run on every captured node.
 detectors: tuple[Detector, ...] = DEFAULT_DETECTORS
 
-#: Signals that, on their own, mark a node suspect.
+#: Signals that, on their own, mark a node suspect. Reassigned below once `PROFILES` is
+#: defined, so `WEBR_PROFILE` applies from import.
 suspect_signals: frozenset[str] = DEFAULT_SUSPECT_SIGNALS
 
 #: Applied to payload text before it is fingerprinted, inspected, or stored.
@@ -102,6 +107,83 @@ def set_suspect_signals(*names: str) -> None:
     """Choose which signals are damning enough to mark a node suspect."""
     global suspect_signals
     suspect_signals = frozenset(names)
+
+
+#: Suspicion policy by domain.
+#:
+#: There is deliberately **no separate build for non-LLM systems**, and no switch that
+#: turns detection into "text mode" or "numeric mode". Detection already dispatches per
+#: node on what that node actually returned: text output gets the lexical detectors,
+#: non-text output gets the value detectors. A pipeline whose planner returns prose and
+#: whose embedder returns a vector gets the right checks on each, with no configuration --
+#: and a mode switch could only make that worse by forcing one answer on both.
+#:
+#: What genuinely cannot be inferred is which signals are *damning in your domain*. An
+#: all-zero vector is a dead embedding in one pipeline and an ordinary sparse row in the
+#: next. That is a policy question, so it is the only thing a profile sets.
+PROFILES: dict[str, frozenset[str]] = {
+    # The default. Conservative: only signals that are wrong in essentially every context.
+    "llm": DEFAULT_SUSPECT_SIGNALS,
+    # ML, embedding, and feature pipelines, where a well-formed but degenerate result is
+    # the characteristic failure. `refusal` and `json_invalid` stay on -- data pipelines
+    # call models too, and a signal that never fires costs nothing.
+    "data": DEFAULT_SUSPECT_SIGNALS | {"all_zeros", "empty_collection", "unchanged_value"},
+    # Everything the detectors can report. Expect false positives: `novel_numbers` fires
+    # legitimately on any node whose job is to produce a figure nobody passed in. Useful
+    # for a first pass over an unfamiliar system, not for a steady state.
+    "strict": DEFAULT_SUSPECT_SIGNALS
+    | {
+        "all_zeros",
+        "empty_collection",
+        "unchanged_value",
+        "novel_numbers",
+        "passthrough",
+        "repetition",
+        "input_overlap",
+    },
+}
+
+
+def set_profile(name: str) -> None:
+    """Apply a suspicion policy by name: `"llm"` (default), `"data"`, or `"strict"`.
+
+    Sugar over `set_suspect_signals`, and nothing more -- the detectors that run are
+    unaffected, because which detectors apply is decided per node from the output itself.
+    Use `set_suspect_signals(...)` directly when you want a policy of your own; a profile
+    is a starting point, not a ceiling.
+
+    Raises:
+        ValueError: on an unknown name. Silently ignoring a typo would leave you running
+            the default policy while believing you had changed it.
+    """
+    try:
+        signals = PROFILES[name]
+    except KeyError:
+        known = ", ".join(sorted(PROFILES))
+        raise ValueError(f"unknown profile {name!r}; expected one of: {known}") from None
+    global suspect_signals
+    suspect_signals = signals
+
+
+def _env_profile() -> frozenset[str]:
+    """Read `WEBR_PROFILE`, so a deployment can change policy without a code change."""
+    name = os.environ.get("WEBR_PROFILE")
+    if not name:
+        return DEFAULT_SUSPECT_SIGNALS
+    try:
+        return PROFILES[name.strip().lower()]
+    except KeyError:
+        # Falling back silently would leave the operator believing a policy was in force
+        # that is not. Loud, once, and then carry on with the default.
+        logger.warning(
+            "WEBR_PROFILE=%r is not a known profile (%s); using the default policy",
+            name,
+            ", ".join(sorted(PROFILES)),
+        )
+        return DEFAULT_SUSPECT_SIGNALS
+
+
+suspect_signals = _env_profile()
 
 
 _buffer = TraceBuffer()
@@ -254,5 +336,5 @@ def reset() -> None:
     capture_full = _env_flag("WEBR_CAPTURE_FULL", False)
     capture_text = _env_flag("WEBR_CAPTURE_TEXT", True)
     detectors = DEFAULT_DETECTORS
-    suspect_signals = DEFAULT_SUSPECT_SIGNALS
+    suspect_signals = _env_profile()
     redactor = None

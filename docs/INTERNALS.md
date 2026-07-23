@@ -224,6 +224,7 @@ In dependency order — each depends only on those above it.
 | `collapse.py` | Per-agent aggregate view | A *view*, not a trace: ids are synthetic and durations are sums. The worst status always wins |
 | `instrument.py` | Provider-SDK wrapper | A proxy, not a monkey-patch. Imports no SDK; reads the response shape defensively. Sync-vs-async is decided at wrap time, never by calling |
 | `render.py` | Terminal output | ASCII only, on purpose |
+| `html.py` | Standalone HTML report | One self-contained file, zero deps, no CDN. The document is embedded as inert JSON, never interpolated into script |
 | `__main__.py` | `python -m webrtrace` | Reads a file or a directory |
 
 ---

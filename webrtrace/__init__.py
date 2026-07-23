@@ -33,6 +33,7 @@ from .graph import (
     load_jsonl,
     write_graph,
 )
+from .html import render_html, write_html
 from .instrument import instrument, usage_from_response
 from .links import Link, clear_marks, link, mark, mark_count, origin
 from .propagation import (
@@ -57,6 +58,7 @@ from .render import (
     render_tree,
 )
 from .runtime import (
+    PROFILES,
     configure,
     default_trace_path,
     disable,
@@ -69,6 +71,7 @@ from .runtime import (
     set_buffer,
     set_capture,
     set_detectors,
+    set_profile,
     set_redactor,
     set_suspect_signals,
     start_writer,
@@ -83,6 +86,7 @@ __all__ = [
     "DEFAULT_DETECTORS",
     "DEFAULT_PINNED_CAPACITY",
     "DEFAULT_SUSPECT_SIGNALS",
+    "PROFILES",
     "REDACTED",
     "SCHEMA_VERSION",
     "VALUE_DETECTORS",
@@ -132,6 +136,7 @@ __all__ = [
     "remote_parent",
     "render",
     "render_failures",
+    "render_html",
     "render_links",
     "render_summary",
     "render_tree",
@@ -139,6 +144,7 @@ __all__ = [
     "set_buffer",
     "set_capture",
     "set_detectors",
+    "set_profile",
     "set_propagator",
     "set_redactor",
     "set_suspect_signals",
@@ -148,4 +154,5 @@ __all__ = [
     "usage_from_response",
     "webR_node",
     "write_graph",
+    "write_html",
 ]

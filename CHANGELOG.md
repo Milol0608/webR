@@ -27,6 +27,21 @@ while the major version is `0`, the public API may change between minor releases
   transforms are covered. Only `nan` and `infinite` mark a node suspect; an empty result
   list is frequently correct. Number scanning is bounded at 10,000 values per node, and
   `bool` is excluded from the numeric checks since it subclasses `int`.
+- **Suspicion profiles** — `set_profile("llm"|"data"|"strict")` and `WEBR_PROFILE` set the
+  suspect-signal policy by domain in one line. There is deliberately no separate build or
+  runtime "mode" for non-LLM systems: detection already dispatches per node on whether the
+  output is text, so the only thing a profile sets is which signals are damning in your
+  domain. An unknown name raises rather than silently leaving the default in force.
+- **Standalone HTML report** — `write_html(path)` / `render_html(document)` and
+  `python -m webrtrace <file> --html <out>` produce a single self-contained HTML file: the
+  tree, expandable per node for payloads, tokens, and signals; a run-wide token total; and
+  a failures-only filter. No server, no network, no CDN — it renders on an air-gapped
+  machine. The document is embedded as inert JSON and node names are never treated as
+  markup, so a report is not an injection vector.
+- **A runnable demo** — `python -m demo --mode good|silent|fail` (`--open` for the report):
+  a five-agent support-ticket pipeline showing a healthy run, a silently-wrong run, and a
+  loud failure side by side, with a fake provider so tokens and refusals appear without an
+  API key.
 - [ADR 0003](docs/adr/0003-tokens-and-instrumentation.md) recording all five decisions.
 
 ### Changed

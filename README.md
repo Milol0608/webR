@@ -61,9 +61,10 @@ to call sites, no configuration required.
 
 | | |
 |---|---|
-| [Diagnosing with webR](docs/USING.md) | A playbook organised by symptom: *my agent returned something wrong, now what* |
+| [User guide](docs/USING.md) | A playbook organised by symptom: *my agent returned something wrong, now what* |
 | [How webR works](docs/INTERNALS.md) | The mechanisms, module by module, and why each decision went the way it did |
 | [`examples/`](examples/) | Six runnable examples, no API key required |
+| [`demo/`](demo/) | A five-agent app in three modes — `python -m demo --mode silent --open` |
 
 ---
 
@@ -159,7 +160,9 @@ Only `refusal`, `empty_output`, `json_invalid`, `nan`, and `infinite` mark a nod
 by default.
 `novel_numbers` fires often and legitimately — a node that computes a total is *supposed*
 to produce a figure nobody passed in — so it informs rather than accuses. Adjust with
-`webrtrace.set_suspect_signals(...)`.
+`webrtrace.set_suspect_signals(...)`, or pick a preset with `webrtrace.set_profile("data")`
+(promotes `all_zeros`, `empty_collection`, and `unchanged_value` for ML pipelines) — see
+the [user guide](docs/USING.md#choosing-a-suspicion-profile).
 
 ### Blast radius
 
@@ -415,11 +418,13 @@ and the buffer becomes a cache for live inspection.
 | `set_capture(on, full=None, text=None)` | Payload capture, process-wide. `text=False` keeps detection without storing readable payloads |
 | `set_detectors(*detectors)` | Replace the detector set; pass nothing to disable detection |
 | `set_suspect_signals(*names)` | Which signals mark a node suspect |
+| `set_profile(name)` | A suspicion policy by name: `"llm"` (default), `"data"`, `"strict"` |
 | `configure(capacity, pinned_capacity)` | Replace the buffer |
 | `start_writer(path, …)` / `stop_writer()` / `flush()` | JSONL streaming |
 | `reset()` | Drop everything recorded and restore defaults |
 
-Environment: `WEBR_ENABLED`, `WEBR_CAPTURE`, `WEBR_CAPTURE_FULL`, `WEBR_CAPTURE_TEXT`.
+Environment: `WEBR_ENABLED`, `WEBR_CAPTURE`, `WEBR_CAPTURE_FULL`, `WEBR_CAPTURE_TEXT`,
+`WEBR_PROFILE`.
 
 ### Logging
 
@@ -449,6 +454,7 @@ figures it finds into `signals`. If you handle data you may not retain, use
 | `graph_from_jsonl(path)` | Graph document from a file or a directory |
 | `collapse_by_agent(document)` | Aggregate repeated invocations into one node per agent |
 | `render(document)` / `render_failures(document)` | Terminal output; the second is just the chains that broke |
+| `write_html(path, document=None)` / `render_html(document)` | A standalone, self-contained HTML report — no server, no network |
 | `inject()` / `remote_parent(carrier)` | Carry a trace across a process or machine boundary |
 | `set_redactor(fn)` / `common_secrets` | Scrub payloads before they are recorded |
 | `write_graph(path, buffer=None)` | Write the document as JSON |

@@ -1,18 +1,43 @@
-# Diagnosing with webR
+# The webR user guide
 
 A playbook, organised by the problem you actually have rather than by the API. If you are
-here because something is wrong right now, start at [My agent returned something
+here because something is wrong right now, skip to [My agent returned something
 wrong](#my-agent-returned-something-wrong).
 
+- [See it work in 30 seconds](#see-it-work-in-30-seconds)
 - [Instrumenting a system for the first time](#instrumenting-a-system-for-the-first-time)
+- [Choosing a suspicion profile](#choosing-a-suspicion-profile)
 - [My agent returned something wrong](#my-agent-returned-something-wrong)
 - [Reading the tree](#reading-the-tree)
+- [A visual report you can share](#a-visual-report-you-can-share)
+- [My agent doesn't return text](#my-agent-doesnt-return-text)
+- [Where did the tokens go](#where-did-the-tokens-go)
 - [The wrongness came from data, not a call](#the-wrongness-came-from-data-not-a-call)
 - [It only breaks in production](#it-only-breaks-in-production)
 - [Teaching webR what "wrong" means for you](#teaching-webr-what-wrong-means-for-you)
 - [When the web is incomplete](#when-the-web-is-incomplete)
 - [When webR is too slow](#when-webr-is-too-slow)
 - [Things webR will not tell you](#things-webr-will-not-tell-you)
+
+---
+
+## See it work in 30 seconds
+
+The repository ships a runnable demo — a five-agent support-ticket pipeline — with three
+modes, so you can see a healthy run, a silently-wrong run, and a loud failure side by side.
+No API key, no network.
+
+```bash
+python -m demo --mode good      # everything works: your baseline
+python -m demo --mode silent    # zero exceptions, wrong answer — the case webR is for
+python -m demo --mode fail      # an ordinary crash, for contrast
+python -m demo --mode silent --open   # also open the HTML report in a browser
+```
+
+The `silent` run is the one to study. A model refuses one ticket (a successful, billed
+call that returned nothing), another answer is truncated at `max_tokens`, and an embedder
+returns a dead vector — and the program raises nothing and reports success. webR marks all
+three and taints the final report that was built on them.
 
 ---
 
@@ -67,6 +92,34 @@ The worst status always wins, so one failure among forty successes still reads a
 From the CLI: `python -m webrtrace traces/ --collapse`. Each collapsed node keeps the
 original `node_ids`, so you can drop back to the raw document to see which invocation it
 was.
+
+---
+
+## Choosing a suspicion profile
+
+There is **one package and one install.** You do not pick an "LLM version" or a "non-LLM
+version" — webR looks at what each node actually returned and runs the right checks: text
+output gets the lexical detectors, non-text output gets the value detectors. A pipeline
+whose planner returns prose and whose embedder returns a vector gets the right checks on
+each, with no configuration.
+
+The one thing webR cannot guess is which signals are *damning in your domain*. An all-zero
+vector is a dead embedding in one system and an ordinary sparse row in the next. That
+policy is a one-liner:
+
+```python
+import webrtrace
+
+webrtrace.set_profile("llm")     # default. Conservative: only signals wrong in any context
+webrtrace.set_profile("data")    # ML / embeddings / features: all_zeros, empty, unchanged
+webrtrace.set_profile("strict")  # everything, incl. novel_numbers — expect false positives
+```
+
+Or set `WEBR_PROFILE=data` in the environment to change policy without touching code. A
+profile is only a starting point; `set_suspect_signals(...)` sets a policy of your own. It
+changes *which signals accuse a node*, never which detectors run — a signal a profile
+leaves informational is still recorded, so nothing is lost, it simply does not mark the
+node `[SUS]`.
 
 ---
 
@@ -166,6 +219,34 @@ were involved, and it works even though webR never stored the payload itself.
 `[SUS]` above `[ERR]` in the same branch is the classic pattern: the model refused, and
 the parser downstream then failed on the apology. The refusal is the cause; the parse error
 is the symptom.
+
+---
+
+## A visual report you can share
+
+The terminal tree is enough for a quick look. For a large web, a wrong answer you need to
+hand to a teammate, or a failure worth attaching to a bug report, write an HTML report:
+
+```python
+webrtrace.write_html("report.html")            # from the in-memory buffer
+webrtrace.write_html("report.html", web)       # or from a document you already have
+```
+
+Or from a trace file, without writing any code:
+
+```bash
+python -m webrtrace traces/run.jsonl --html report.html
+```
+
+Open it in any browser. It is **one self-contained file** — no server, no network, no CDN,
+nothing to install — so it renders on an air-gapped machine and is safe to email. It shows
+the same tree, expandable per node for payloads, tokens, and signals; a token total across
+the run; and a "only failures, suspects, and taint" filter for finding the problem in a
+web with thousands of nodes. Payloads are embedded as inert data, never as script, and a
+node name is never trusted as markup — a report is not an injection vector.
+
+If you handle data you may not retain, set `set_capture(True, text=False)` before the run;
+the report then shows lengths, hashes, and signals but no readable payload.
 
 ---
 
@@ -444,7 +525,8 @@ Measure rather than guess — `python benchmarks/overhead.py` reproduces the tab
   correct means.
 - **Why the model did something.** webR records what crossed the boundary, not the model's
   reasoning.
-- **What happened in a process it was not running in.** Cross-process propagation is not
-  implemented; only `SENDS` tokens cross that boundary today.
+- **What happened in a process it was not running in, unless you carried the context.**
+  `inject()` / `remote_parent()` join a trace across a process boundary; without them, a
+  node in another process is simply absent.
 - **Anything about a node you did not decorate.** A gap in the tree is a gap in the
   instrumentation, not evidence that nothing happened there.

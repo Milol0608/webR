@@ -5,6 +5,7 @@
     python -m webrtrace traces/run.jsonl
     python -m webrtrace traces/ --failures
     python -m webrtrace traces/run.jsonl --json > web.json
+    python -m webrtrace traces/run.jsonl --html report.html
 
 Accepts a file or a directory, so a run split across rotated files reassembles without
 the caller having to think about it.
@@ -41,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit the raw graph document")
     parser.add_argument(
+        "--html",
+        type=Path,
+        metavar="FILE",
+        help="write a standalone HTML report to FILE and exit",
+    )
+    parser.add_argument(
         "--width", type=int, default=32, help="node name column width (default: 32)"
     )
     args = parser.parse_args(argv)
@@ -64,7 +71,15 @@ def main(argv: list[str] | None = None) -> int:
         # has no single error to report.
         document = collapse_by_agent(document)
 
-    if args.json:
+    if args.html is not None:
+        from .html import write_html
+
+        # The report renders the full tree, so it is written from the raw document even
+        # under --collapse, which flattens the structure the report wants to show.
+        source = graph_from_jsonl(args.path)
+        destination = write_html(args.html, source, title=f"webR — {args.path.name}")
+        print(f"wrote {destination}")
+    elif args.json:
         json.dump(document, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
     elif args.failures:
