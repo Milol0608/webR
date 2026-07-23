@@ -57,6 +57,10 @@ packages = ["webrtrace"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# ruff 0.16 began formatting Markdown code blocks by default. The snippets in README and
+# the docs are hand-laid-out for teaching -- `...` on its own line, aligned comments -- and
+# collapsing them would hurt readability, so ruff is kept to Python files only.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
