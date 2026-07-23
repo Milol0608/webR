@@ -30,10 +30,15 @@ def buffer() -> TraceBuffer:
 
 
 def _reset_process_state() -> None:
+    # Every knob a test can turn must be restored here. `capture_text` was missing, and a
+    # test that disabled it silently changed the behaviour of the next test -- the kind of
+    # cross-test leak that makes a suite quietly stop testing what it claims to.
     webrtrace.enable()
-    webrtrace.set_capture(True, full=False)
+    webrtrace.set_capture(True, full=False, text=True)
     webrtrace.set_detectors(*webrtrace.DEFAULT_DETECTORS)
     webrtrace.set_suspect_signals(*webrtrace.DEFAULT_SUSPECT_SIGNALS)
+    webrtrace.set_redactor(None)
+    webrtrace.clear_marks()
 
 
 def by_name(buffer: TraceBuffer, name: str) -> NodeRecord:

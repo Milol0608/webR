@@ -13,6 +13,7 @@ the caller having to think about it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -47,6 +48,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.path.exists():
         print(f"error: {args.path} does not exist", file=sys.stderr)
         return 2
+
+    # A node named from a user's prompt can hold any character, and a Windows console on a
+    # legacy code page raises UnicodeEncodeError on print(). Replacing unencodable
+    # characters is strictly better than a traceback where the trace should have been.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(errors="replace")
 
     document = graph_from_jsonl(args.path)
     if args.collapse:

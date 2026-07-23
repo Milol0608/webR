@@ -11,6 +11,7 @@ capture is on by default and its cost is the one that scales.
 
 from __future__ import annotations
 
+import gc
 import timeit
 
 import webrtrace
@@ -27,12 +28,21 @@ _traced_off = webR_node(name="off", capture=False)(lambda prompt: prompt)
 _traced_on = webR_node(name="on", capture=True)(lambda prompt: prompt)
 
 
-def _measure(fn, payload: str) -> float:
-    """Microseconds per call, on a buffer small enough that eviction stays realistic."""
+def _measure(fn, payload: str, *, repeats: int = 7, number: int = 2_000) -> float:
+    """Microseconds per call, on a buffer small enough that eviction stays realistic.
+
+    Reports the *minimum* of several repeats with the collector paused. A single
+    `autorange()` on a busy machine swung by 2-3x between runs and made the no-capture
+    column appear to depend on payload size, which it does not.
+    """
     webrtrace.configure(capacity=1_000)
-    timer = timeit.Timer(lambda: fn(payload))
-    iterations, total = timer.autorange()
-    return total / iterations * 1e6
+    gc.disable()
+    try:
+        timer = timeit.Timer(lambda: fn(payload))
+        best = min(timer.repeat(repeat=repeats, number=number)) / number
+    finally:
+        gc.enable()
+    return best * 1e6
 
 
 def main() -> None:

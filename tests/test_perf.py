@@ -22,9 +22,11 @@ from webrtrace import webR_node
 
 pytestmark = pytest.mark.perf
 
-CAPTURE_OFF_CEILING_US = 25.0
-CAPTURE_ON_CEILING_US = 400.0
-LARGE_PAYLOAD_CEILING_US = 2_000.0
+# Several times the measured figures in ADR 0002, so ordinary machine noise never turns
+# these red. They exist to catch an order-of-magnitude regression, not drift.
+CAPTURE_OFF_CEILING_US = 60.0
+CAPTURE_ON_CEILING_US = 900.0
+LARGE_PAYLOAD_CEILING_US = 4_000.0
 
 
 def _overhead_us(fn, payload: str) -> float:

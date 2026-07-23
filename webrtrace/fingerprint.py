@@ -32,16 +32,27 @@ def _digest(text: str) -> str:
     return blake2b(text.encode("utf-8", "replace"), digest_size=8).hexdigest()
 
 
-def fingerprint(text: str, *, full: bool = False) -> dict[str, Any]:
+def fingerprint(text: str, *, full: bool = False, store_text: bool = True) -> dict[str, Any]:
     """Summarize one payload.
 
     Args:
         text: The payload.
         full: Store the text itself, capped at `MAX_FULL_CHARS`. Off by default because
             full capture is what turns a trace file into a liability.
+        store_text: When False, store only the length and hash -- no text, no head, no
+            tail. Detectors still run (they see the text in memory), so hallucination
+            signals survive while nothing readable is persisted. This is the setting for
+            payloads you may not retain at all; the default is *not* it, because a short
+            payload is stored in full and a long one keeps its first and last 200
+            characters.
     """
     length = len(text)
     summary: dict[str, Any] = {"len": length, "hash": _digest(text)}
+
+    if not store_text:
+        if length > HEAD_TAIL_CHARS * 2:
+            summary["truncated"] = True
+        return summary
 
     if full:
         if length > MAX_FULL_CHARS:

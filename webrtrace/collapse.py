@@ -126,8 +126,10 @@ def collapse_by_agent(document: dict[str, Any]) -> dict[str, Any]:
 
     collapsed_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in document.get("edges", []):
-        source = representative.get(edge["src_id"])
-        target = representative.get(edge["dst_id"])
+        # `.get` rather than `[...]`: a trace file truncated mid-write can yield an edge
+        # missing an endpoint, and refusing to collapse a damaged trace helps nobody.
+        source = representative.get(edge.get("src_id"))
+        target = representative.get(edge.get("dst_id"))
         if source is None or target is None or source == target:
             # Self-edges appear when two invocations of the same agent linked to each
             # other; as an aggregate that says nothing.

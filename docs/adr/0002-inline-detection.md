@@ -50,11 +50,20 @@ in characters (Python 3.14, Windows):
 
 | payload | capture off | capture on |
 |--------:|------------:|-----------:|
-| 0 | 4.5 | 10.7 |
-| 100 | 4.5 | 21.4 |
-| 1,000 | 4.5 | 82.5 |
-| 10,000 | 4.5 | 199.5 |
-| 100,000 | 4.5 | 395.5 |
+| 0 | 11.7 | 27.8 |
+| 100 | 8.2 | 51.3 |
+| 1,000 | 11.8 | 213.6 |
+| 10,000 | 11.9 | 559.8 |
+| 100,000 | 12.6 | 1026.7 |
+
+These figures replace an earlier set roughly half as large (4.5 / 82.5 / 395.5). The
+increase is the price of the fixes from the adversarial review — containing faults in
+webR's own machinery on every call, assigning `seq` at open so ordering reflects
+invocation, and checking for a durable writer — and was accepted rather than traded back,
+because each one is what makes the trace *true*. The measurement method also changed:
+minimum of several repeats with the collector paused, since a single `autorange()` on a
+busy machine varied by 2-3x and made the no-capture column look payload-dependent when it
+is not.
 
 Three findings from taking the measurement rather than assuming it:
 

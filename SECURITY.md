@@ -39,8 +39,22 @@ webR is a debugging tool that records what passes through your agents. Understan
 writes:
 
 - **By default**, payloads are stored as a fingerprint: a length, a 64-bit hash, and the
-  **first and last 200 characters**. Those excerpts are real content, and for a short
-  prompt the "fingerprint" is the entire text.
+  **first and last 200 characters**. Those excerpts are real content, and for a prompt
+  under 400 characters the "fingerprint" is the entire text, stored verbatim.
+- **Detector signals can also quote the payload.** `novel_numbers` copies the figures it
+  found — which is the point, but it means an account balance or a date can appear in
+  `signals` even when you were thinking only about `io`. `refusal` records the matched
+  phrase.
+- **To keep detection but store nothing readable**, disable text capture. Lengths and
+  hashes are kept, detectors still run against the in-memory text, and value-bearing
+  signals are reduced to counts:
+
+  ```python
+  webrtrace.set_capture(True, text=False)          # process-wide
+  @webrtrace.webR_node(capture_text=False)         # or per node
+  ```
+
+  This is the setting for data you are not permitted to retain. The default is **not** it.
 - **With `capture_full=True`** or `WEBR_CAPTURE_FULL=1`, prompts and completions are written
   **verbatim**, capped at 8KB each. If your prompts contain customer data, credentials, or
   anything regulated, that data is now in a plaintext file on disk.
@@ -55,7 +69,10 @@ Practical guidance:
   capturing every string argument.
 - Use `capture=False` on nodes handling credentials or PII.
 - Turn capture off entirely in production unless you are actively investigating:
-  `webrtrace.set_capture(False)` or `WEBR_CAPTURE=0`.
+  `webrtrace.set_capture(False)` or `WEBR_CAPTURE=0`. To keep hallucination detection
+  without storing text, prefer `set_capture(True, text=False)` / `WEBR_CAPTURE_TEXT=0`.
+- Trace files are written per process by default (`traces/webrtrace-<pid>.jsonl`). If you
+  pass an explicit path, keep it unique per process — two writers on one file corrupt it.
 - Scrub traces before attaching them to a bug report.
 
 ## Redaction
@@ -71,6 +88,10 @@ webrtrace.set_redactor(webrtrace.common_secrets)          # process-wide
 @webrtrace.webR_node(redact=my_scrubber)                  # or per node
 def handle(prompt: str) -> str: ...
 ```
+
+It scrubs **inputs, outputs, and the message and traceback of any exception** — a provider
+SDK echoing the failing request into an error ("401 for `api_key=sk-...`") is ordinary, so
+the error path is redacted on the same terms as any other payload.
 
 **It fails closed.** If your redactor raises or returns a non-string, the payload is
 *discarded* rather than recorded, and `redaction_failed` appears in the node's signals. Any

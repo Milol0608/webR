@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import json
 
 import pytest
 from conftest import by_name
@@ -18,6 +19,7 @@ from conftest import by_name
 import webrtrace
 from webrtrace import webR_node
 from webrtrace.propagation import NodeRef
+from webrtrace.records import NodeStatus
 
 # --- Batch 1: safety + integrity ----------------------------------------------------
 
@@ -470,6 +472,156 @@ def test_stopping_a_writer_unregisters_its_atexit_handler(tmp_path):
     # it, this would be the only thing keeping the writer referenced.
     atexit.unregister(writer.stop)
     assert writer.stats()["path"].endswith("run.jsonl")
+
+
+# --- Batch 4: portability + polish --------------------------------------------------
+
+
+def test_rotation_never_overwrites_an_existing_rotated_file(tmp_path):
+    # portability #1: Path.rename silently REPLACES on POSIX (destroying a previous run's
+    # rotated trace) and raises on Windows (disabling rotation). Both from one line.
+    from webrtrace.writer import JsonlWriter
+
+    path = tmp_path / "run.jsonl"
+    # A rotated file from an earlier run, with content that must survive.
+    (tmp_path / "run.jsonl.1").write_text('{"record":"node","from":"previous run"}\n')
+
+    writer = JsonlWriter(path, flush_interval=60.0, rotate_bytes=200)
+    try:
+        for _ in range(40):
+            writer.submit(make_open_free_record())
+            writer.flush()
+    finally:
+        writer.stop()
+
+    assert "previous run" in (tmp_path / "run.jsonl.1").read_text()
+    assert writer.stats()["rotations"] > 0
+    # It rotated to a free name instead of clobbering or giving up.
+    assert (tmp_path / "run.jsonl.2").exists()
+
+
+def test_submit_does_not_wait_on_a_slow_disk(tmp_path):
+    # concurrency #2: _drain held the only lock across file.write(), so submit() -- and
+    # therefore every traced call -- blocked on the filesystem, while its docstring
+    # promised it never blocks.
+    import threading
+    import time
+
+    from webrtrace.writer import JsonlWriter
+
+    writer = JsonlWriter(tmp_path / "run.jsonl", flush_interval=60.0)
+    released = threading.Event()
+
+    class SlowFile:
+        closed = False
+
+        def write(self, _payload):
+            released.wait(5.0)  # a disk that takes a long time to accept a write
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    try:
+        writer.submit(make_open_free_record())
+        with writer._io_lock:
+            real_file, writer._file = writer._file, SlowFile()
+
+        drainer = threading.Thread(target=writer.flush)
+        drainer.start()
+        time.sleep(0.2)  # let the drain get inside the slow write
+
+        start = time.perf_counter()
+        writer.submit(make_open_free_record())
+        elapsed = time.perf_counter() - start
+
+        released.set()
+        drainer.join(timeout=10)
+        assert elapsed < 0.5, f"submit blocked for {elapsed:.2f}s behind a disk write"
+    finally:
+        released.set()
+        with writer._io_lock:
+            writer._file = real_file
+        writer.stop()
+
+
+def test_the_default_trace_path_is_per_process():
+    # portability #3: one fixed default meant two processes appended to the same file
+    # with no locking, silently destroying each other's records.
+    import os
+
+    assert str(os.getpid()) in str(webrtrace.default_trace_path())
+
+
+def test_render_tolerates_a_malformed_document():
+    # api-abuse #5: load_jsonl deliberately skips unparseable lines, so the renderer must
+    # be equally forgiving -- a post-mortem tool that crashes on a damaged trace is
+    # useless exactly when it is needed.
+    from webrtrace.render import render, render_links, render_tree
+
+    broken = {
+        "nodes": [
+            {"name": "no id at all", "status": "ok", "seq": 1},
+            {"node_id": "a", "name": "fine", "status": "ok", "seq": 2, "parent_id": None},
+        ],
+        "edges": [
+            {"kind": "sends", "src_id": "a"},  # missing dst_id
+            {"kind": "sends"},  # missing both
+        ],
+        "stats": {},
+    }
+    assert "fine" in render_tree(broken)
+    assert isinstance(render_links(broken), str)
+    assert isinstance(render(broken), str)
+
+
+def test_collapse_tolerates_a_malformed_document():
+    broken = {
+        "nodes": [{"node_id": "a", "name": "x", "status": "ok", "seq": 1, "parent_id": None}],
+        "edges": [{"kind": "invokes", "src_id": "a"}],  # missing dst_id
+        "stats": {},
+    }
+    collapsed = webrtrace.collapse_by_agent(broken)
+    assert collapsed["stats"]["nodes"] == 1
+
+
+def test_disabling_text_capture_stores_nothing_readable_but_still_detects(buffer):
+    # The gap this closed: previously the only choices were "store excerpts" (the default,
+    # which keeps a short payload in full) or "capture nothing" (losing detection too).
+    secret = "Patient Maria Gonzalez balance 48211.55 card 4242424242424242"
+
+    @webR_node(name="agent")
+    def agent(prompt):
+        return "I'm sorry, I don't have access to that."
+
+    webrtrace.set_capture(True, text=False)
+    agent(secret)
+
+    record = by_name(buffer, "agent")
+    blob = json.dumps({"io": record.io, "signals": record.signals})
+
+    for fragment in ("Maria", "Gonzalez", "48211", "4242", "sorry", "access"):
+        assert fragment not in blob, f"{fragment!r} leaked with text capture disabled"
+
+    # Length and hash survive, so "did this content change" is still answerable...
+    assert record.io["inputs"]["prompt"]["len"] == len(secret)
+    assert record.io["inputs"]["prompt"]["hash"]
+    # ...and the refusal was still caught.
+    assert record.status is NodeStatus.SUSPECT
+    assert record.signals["refusal"] is True
+
+
+def test_default_capture_does_store_readable_text(buffer):
+    # The counterpart, asserted so the security posture is explicit rather than assumed:
+    # the DEFAULT is not a privacy control.
+    @webR_node(name="agent")
+    def agent(prompt):
+        return "ok"
+
+    agent("a short prompt with a name in it")
+    assert "a short prompt" in by_name(buffer, "agent").io["inputs"]["prompt"]["text"]
 
 
 def test_seq_orders_concurrent_siblings_by_invocation(buffer):

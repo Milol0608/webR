@@ -465,9 +465,10 @@ produced `detectors.py`.
 **The trick:** examine the text while it is in memory, keep only the *conclusions*, throw the
 text away. A 4KB prompt becomes about 60 bytes of findings plus a fingerprint.
 
-**What it cost:** honestly measured, ~82 microseconds per call on a 1KB payload instead of
-~4.5. Invisible next to an AI call taking seconds; not invisible in a tight loop. Documented
-rather than hidden.
+**What it cost:** honestly measured, ~214 microseconds per call on a 1KB payload instead of
+~12. Invisible next to an AI call taking seconds; not invisible in a tight loop. Documented
+rather than hidden — and re-measured, and the number went *up*, after the adversarial review
+added fault isolation to every traced call.
 
 ### Q5 — Data-flow edges must be declared, not guessed
 

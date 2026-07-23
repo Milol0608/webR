@@ -50,6 +50,12 @@ capture: bool = _env_flag("WEBR_CAPTURE", True)
 #: When True, capture stores the payload text itself (capped) rather than a fingerprint.
 capture_full: bool = _env_flag("WEBR_CAPTURE_FULL", False)
 
+#: When False, no readable payload is stored at all -- only lengths and hashes. Detectors
+#: still run, so hallucination signals survive; signals that quote the payload are reduced
+#: to counts. Note the default (True) stores short payloads in full and the first and last
+#: 200 characters of long ones.
+capture_text: bool = _env_flag("WEBR_CAPTURE_TEXT", True)
+
 #: Detectors run on every captured node.
 detectors: tuple[Detector, ...] = DEFAULT_DETECTORS
 
@@ -71,12 +77,19 @@ def set_redactor(fn: Redactor | None) -> None:
     redactor = fn
 
 
-def set_capture(on: bool, *, full: bool | None = None) -> None:
-    """Turn payload capture on or off process-wide, optionally switching to full text."""
-    global capture, capture_full
+def set_capture(on: bool, *, full: bool | None = None, text: bool | None = None) -> None:
+    """Turn payload capture on or off process-wide.
+
+    `full=True` stores payloads verbatim (capped). `text=False` stores none of the payload
+    at all -- lengths and hashes only -- while leaving detection running, which is the
+    setting for data you are not permitted to retain.
+    """
+    global capture, capture_full, capture_text
     capture = on
     if full is not None:
         capture_full = full
+    if text is not None:
+        capture_text = text
 
 
 def set_detectors(*chosen: Detector) -> None:
@@ -168,8 +181,19 @@ def configure(
     return buffer
 
 
+def default_trace_path() -> Path:
+    """`traces/webrtrace-<pid>.jsonl` -- per process, deliberately.
+
+    A single fixed default meant two processes appended to one file with no locking, and
+    their interleaved partial lines destroyed records that neither process ever knew were
+    lost. Since `graph_from_jsonl` reads a whole directory and stitches the halves, one
+    file per process costs nothing and makes the multi-process case correct by default.
+    """
+    return Path("traces") / f"webrtrace-{os.getpid()}.jsonl"
+
+
 def start_writer(
-    path: str | Path = "traces/webrtrace.jsonl",
+    path: str | Path | None = None,
     **options: Any,
 ) -> JsonlWriter:
     """Begin streaming completed nodes to a JSONL file.
@@ -177,7 +201,12 @@ def start_writer(
     Without this, webR keeps only the bounded in-memory view, and a hard crash takes the
     trace with it. Any writer already running is stopped first so that two writers can
     never interleave lines into the same file.
+
+    The default path includes the process id. If you pass an explicit path, it is yours to
+    keep unique -- two processes sharing one file will corrupt it.
     """
+    if path is None:
+        path = default_trace_path()
     global _writer
     stop_writer()
     _writer = JsonlWriter(path, **options)
@@ -210,7 +239,7 @@ def reset() -> None:
     Does not touch the writer: records already on disk are the durable history, and
     silently truncating a file the user asked for would be a nasty surprise.
     """
-    global enabled, capture, capture_full, detectors, suspect_signals, redactor
+    global enabled, capture, capture_full, capture_text, detectors, suspect_signals, redactor
     # Imported here rather than at module scope: `links` imports this module, and a
     # top-level import either way would be circular.
     from .links import clear_marks
@@ -223,6 +252,7 @@ def reset() -> None:
     enabled = True
     capture = _env_flag("WEBR_CAPTURE", True)
     capture_full = _env_flag("WEBR_CAPTURE_FULL", False)
+    capture_text = _env_flag("WEBR_CAPTURE_TEXT", True)
     detectors = DEFAULT_DETECTORS
     suspect_signals = DEFAULT_SUSPECT_SIGNALS
     redactor = None
