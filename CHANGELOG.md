@@ -3,7 +3,10 @@
 Notable changes to webR. This project follows [Semantic Versioning](https://semver.org/);
 while the major version is `0`, the public API may change between minor releases.
 
-## [Unreleased]
+## [0.2.0] — 2026-07-23
+
+The first release published to PyPI. Adds token accounting, provider instrumentation,
+suspicion profiles, a standalone HTML report, and a runnable demo on top of the 0.1.0 core.
 
 ### Added
 
@@ -66,7 +69,8 @@ while the major version is `0`, the public API may change between minor releases
 
 ## [0.1.0] — 2026-07-21
 
-First public release.
+Initial development version — the core tracing library. Never published to PyPI; 0.2.0 is
+the first public release, and its notes above sit on top of everything here.
 
 ### Added
 

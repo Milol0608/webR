@@ -11,6 +11,19 @@
 pip install webrtrace
 ```
 
+**New here?** See it catch a real silent failure before you integrate anything — no API key,
+no setup:
+
+```bash
+git clone https://github.com/Milol0608/webR && cd webR
+pip install -e .
+python -m demo --mode silent --open
+```
+
+That runs a five-agent pipeline that returns a confident, wrong answer with zero exceptions,
+and opens an HTML report showing exactly which node poisoned it. Then read
+[Is webR for you?](#is-webr-for-you) to decide if it fits your system.
+
 ---
 
 ## The problem
@@ -65,6 +78,47 @@ to call sites, no configuration required.
 | [How webR works](docs/INTERNALS.md) | The mechanisms, module by module, and why each decision went the way it did |
 | [`examples/`](examples/) | Six runnable examples, no API key required |
 | [`demo/`](demo/) | A five-agent app in three modes — `python -m demo --mode silent --open` |
+
+---
+
+## Is webR for you?
+
+webR is a **silent-failure tracer**. Its job is to make visible the failures that do not
+raise — the ones every exception-based tool records as a clean run. That framing, not "LLM
+observability", is what decides whether it fits.
+
+**Reach for it when:**
+
+- You run a **multi-agent LLM system** and a wrong answer arrives with no stack trace.
+- You run an **ML, embedding, or data pipeline** where a dead vector, a NaN, an all-zero
+  tensor, or an empty frame flows downstream and quietly ruins the result. webR's value
+  detectors and the `data` profile are built for exactly this — it is **not** LLM-only.
+- Your code has **defensive `except` blocks** that swallow an error and substitute a
+  fallback. Your program reports success; webR's taint shows the answer was built on a
+  failure.
+- You want **per-agent token accounting** — including refusals and truncations you were
+  billed for — without wiring a callback into every call site.
+
+**It is probably overkill when:**
+
+- You make a **single LLM call** and check the result inline. One `if` beats a tracer.
+- You only need **latency tracing** across services — use OpenTelemetry; that is what it is
+  for, and webR does not replace it.
+- You are on a **hot path at thousands of calls per second.** webR adds ~12µs per node and
+  has no sampling; it is built for agent-scale (calls measured in milliseconds), not
+  request-scale.
+
+**What it catches:** fabricated figures, refusals passed off as answers, format collapse,
+truncation, no-op passthroughs, degenerate repetition, dead vectors, NaN/inf, empty
+results — plus anything you can express as a `check=`.
+
+**What it cannot catch — stated plainly so you never trust it further than it goes:** a
+fluent, well-formed, plausible sentence that is simply *false*. The detectors are lexical
+and structural; telling a correct total from an invented one needs semantic understanding,
+which webR does not have. Encode what you can as a `check=`; that is the layer that catches
+meaning.
+
+See the [FAQ](#faq) for how it compares to LangSmith, Langfuse, and OpenTelemetry.
 
 ---
 
@@ -479,6 +533,72 @@ Stated plainly, because a debugging tool that overstates itself is worse than no
 - **It does not `fsync`.** Records are flushed to the OS, which survives a process crash —
   the scenario this exists for. A power cut can still lose the last batch.
 - **It is pre-1.0.** The API may change between minor versions.
+
+---
+
+## FAQ
+
+**Does it cost tokens?**
+No. The detectors read your payloads locally — no model, no network, no API call. The only
+tokens webR touches are the ones it *reports*: `instrument()` reads the usage a provider
+already returned. Tracing itself is free.
+
+**Will it slow my program down?**
+About 12µs per traced node with capture on, ~4.5µs without. That vanishes next to an LLM
+call measured in hundreds of milliseconds. It is *not* built for hot paths at thousands of
+calls per second — there is no sampling. See [Performance](#performance).
+
+**Does it send my data anywhere?**
+No. Zero runtime dependencies, no telemetry, no network. Everything stays in your process
+and, if you enable the writer, on your disk. The HTML report is a single local file with no
+external requests. If you handle data you may not retain, `set_capture(True, text=False)`
+keeps detection running while storing no readable payload; `set_redactor(...)` scrubs
+secrets before anything is recorded.
+
+**Does it work without an LLM SDK installed?**
+Yes. webR imports no provider SDK. `instrument()` works by reading the shape of the response
+object, so it needs no `anthropic` package present, and everything else works with plain
+functions.
+
+**Does it work with non-LLM agents?**
+Yes — this is a first-class use, not an afterthought. When a node returns a vector, a
+number, or a collection instead of text, the value detectors run (`nan`, `infinite`,
+`all_zeros`, `empty_collection`, `unchanged_value`). Use `set_profile("data")` to make the
+ones that matter for ML pipelines mark a node suspect. See
+[Is webR for you?](#is-webr-for-you).
+
+**Do I have to change my function signatures or call sites?**
+No. `@webR_node` is the whole integration. Parent/child relationships are discovered through
+`contextvars`, so nothing is threaded through your code. The one thing that *is* explicit is
+a `SENDS` data-dependency edge — `mark()`/`link()` — because inferring those silently would
+invent relationships that are not real.
+
+**How is this different from LangSmith / Langfuse?**
+Those are hosted platforms: dashboards, datasets, evals, prompt management, team features.
+webR is a single dependency-free library that runs in your process and answers one question
+— *which node was first to be wrong* — with taint and structural detectors. If you want a
+managed product with a UI and a team plan, use them. If you want a local, embeddable,
+zero-dependency causality tracer you fully control, use webR. They are not mutually
+exclusive.
+
+**How is this different from OpenTelemetry?**
+OTel answers *"what was slow?"* across services, with a huge exporter/backend ecosystem.
+webR answers *"what was wrong?"* — silent, non-crashing failures — which OTel has no concept
+of (it has no notion of a span that succeeded but is downstream of a problem). For latency
+tracing, use OTel. webR does not replace it, and today does not export to it.
+
+**Can I turn it off in production?**
+Yes. `disable()` at runtime, or `WEBR_ENABLED=0` in the environment, makes every decorator a
+near-transparent passthrough. You can also flip it back on mid-run to investigate a live
+incident.
+
+**How do I see a trace after the run?**
+`print(webrtrace.render(webrtrace.export_graph()))` for the terminal tree,
+`webrtrace.write_html("report.html")` for the shareable report, or stream to disk with
+`start_writer(...)` and read it back with `python -m webrtrace traces/`.
+
+**What Python versions?**
+3.10 and up. CPython. No compiled extensions.
 
 ---
 
