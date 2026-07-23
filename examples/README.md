@@ -16,6 +16,7 @@ python examples/01_hello_web.py
 | [`03_the_silent_failure.py`](03_the_silent_failure.py) | **Start here.** A run with zero exceptions and a wrong answer, and how webR names the origin |
 | [`04_links_across_a_queue.py`](04_links_across_a_queue.py) | Data dependencies the call stack cannot see, in-process and across a thread |
 | [`05_across_processes.py`](05_across_processes.py) | A real worker process joining the caller's trace, and a failure chain that crosses the boundary |
+| [`06_tokens_and_a_billed_refusal.py`](06_tokens_and_a_billed_refusal.py) | `instrument()` on a provider client: per-call tokens, a refusal you paid for, and an embedder that returned zeros |
 
 ## Reading a trace from disk
 

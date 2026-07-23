@@ -63,7 +63,7 @@ to call sites, no configuration required.
 |---|---|
 | [Diagnosing with webR](docs/USING.md) | A playbook organised by symptom: *my agent returned something wrong, now what* |
 | [How webR works](docs/INTERNALS.md) | The mechanisms, module by module, and why each decision went the way it did |
-| [`examples/`](examples/) | Four runnable examples, no API key required |
+| [`examples/`](examples/) | Six runnable examples, no API key required |
 
 ---
 
@@ -128,6 +128,20 @@ Exceptions are the easy case. These are the ones nothing else notices:
 | `input_overlap` | Output with almost no lexical grounding in its input |
 | `length_ratio` | Truncation, or runaway generation |
 
+Not every agent returns prose. When a call produces no text — an embedder, a scorer, a
+feature transform — the lexical detectors have nothing to read, so a **value** pass runs
+instead:
+
+| Signal | What it means |
+|---|---|
+| `nan` / `infinite` | An undefined number reached the output. Never a correct result, in any domain |
+| `all_zeros` | A vector of zeros — the shape a failed embedding or a dead layer returns |
+| `empty_collection` | An empty list or dict where a result was expected |
+| `unchanged_value` | The output equals an input: the transform did nothing |
+
+Only `nan` and `infinite` mark a node suspect. An empty result list is frequently the
+right answer, and saying otherwise would make the flag worthless.
+
 Plus your own domain knowledge, which beats any heuristic:
 
 ```python
@@ -141,7 +155,8 @@ call that worked.
 
 ### Suspicion is conservative
 
-Only `refusal`, `empty_output`, and `json_invalid` mark a node suspect by default.
+Only `refusal`, `empty_output`, `json_invalid`, `nan`, and `infinite` mark a node suspect
+by default.
 `novel_numbers` fires often and legitimately — a node that computes a total is *supposed*
 to produce a figure nobody passed in — so it informs rather than accuses. Adjust with
 `webrtrace.set_suspect_signals(...)`.
@@ -152,6 +167,44 @@ When a node fails or is flagged, every node above it is marked `tainted`. Taint 
 *up* the call tree because that is the direction data flows: a parent consumed whatever
 the child produced. A parent that swallows an exception and reports success is still
 marked — the failure is invisible to your program, but not to the web.
+
+---
+
+## Tokens, without decorating every call site
+
+```python
+from anthropic import Anthropic
+import webrtrace
+
+client = webrtrace.instrument(Anthropic())
+client.messages.create(model="claude-opus-4-8", messages=[...])
+```
+
+Every provider call becomes a node carrying `model`, `input_tokens`, `output_tokens`, the
+two cache counters, and `stop_reason`. Cache tokens stay separate from ordinary input
+because they are priced differently. Async clients and `messages.stream()` are handled;
+the streaming node stays open across the whole `with` block, since usage only arrives once
+the stream finishes.
+
+This is a **wrapper, not an import hook.** Patching the SDK in place would be genuinely
+zero-touch, and it is what comparable tools do, but mutating a third-party module at
+runtime *is* changing how the host program behaves — the one thing this library promises
+never to do. One line of setup buys honesty about what is being touched. Methods webR does
+not recognise are proxied straight through, untraced rather than broken, and nothing here
+imports the provider SDK — webR still has zero runtime dependencies.
+
+The reason this matters beyond accounting: **a `refusal` is a successful call.** HTTP 200,
+`stop_reason: "refusal"`, empty content, nothing raised, and you were billed. It is
+recorded as `suspect`, as is a response truncated at `max_tokens`.
+
+webR reports **tokens, not dollars.** Prices change and vary by contract; a library that
+hardcodes them is wrong the week after it ships. Multiply by your own rates.
+
+If you are not using a supported SDK, report usage yourself from inside any traced call:
+
+```python
+webrtrace.record_usage(Usage(model="local-7b", input_tokens=n_in, output_tokens=n_out))
+```
 
 ---
 
@@ -269,15 +322,21 @@ Microseconds added per call, above the same function undecorated (Python 3.14):
 
 | payload chars | capture off | capture on |
 |--------------:|------------:|-----------:|
-| 0 | 4.5 | 10.7 |
-| 100 | 4.5 | 21.4 |
-| 1,000 | 4.5 | 82.5 |
-| 10,000 | 4.5 | 199.5 |
-| 100,000 | 4.5 | 395.5 |
+| 0 | 11.7 | 27.8 |
+| 100 | 8.2 | 51.3 |
+| 1,000 | 11.8 | 213.6 |
+| 10,000 | 11.9 | 559.8 |
+| 100,000 | 12.6 | 1026.7 |
 
-Reproduce with `python benchmarks/overhead.py`.
+Reproduce with `python benchmarks/overhead.py` (minimum of several repeats, collector
+paused — a single timing run on a busy machine varies by 2–3x).
 
-**Read this honestly.** Against an LLM call taking seconds, 82µs is roughly 0.004% —
+These are roughly double the figures webR carried before its adversarial review. That cost
+bought fault isolation on every traced call, invocation-ordered `seq`, and durable
+start-markers — all of which are load-bearing for the trace being *correct*, and none of
+which were worth trading back for microseconds.
+
+**Read this honestly.** Against an LLM call taking seconds, 214µs is roughly 0.01% —
 invisible. Against a pure-Python helper invoked in a tight loop, it is not. Set
 `capture=False` on those nodes, or disable capture globally and enable it only where you
 are hunting something:
@@ -333,8 +392,11 @@ and the buffer becomes a cache for live inspection.
 | `attributes=` | Static metadata on every record from this callable |
 | `capture=` | `True`, `False`, a tuple of parameter names, or `None` to follow the global setting |
 | `capture_full=` | Store payload text instead of a fingerprint |
+| `capture_text=` | `False` keeps detection but stores no readable payload — lengths and hashes only |
 | `check=` | Validator; return `True` to pass, or `False`/`None`/a reason string to flag |
 | `submit(executor, fn, …)` | `executor.submit` that carries the active node into a worker thread |
+| `instrument(client)` | Wrap a provider client so its calls become nodes with model and token counts |
+| `record_usage(usage)` | Attach `Usage` to the running node by hand. Returns `False` outside a traced call |
 
 ### Links
 
@@ -350,14 +412,34 @@ and the buffer becomes a cache for live inspection.
 | | |
 |---|---|
 | `enable()` / `disable()` | Toggle tracing, including mid-run in a live process |
-| `set_capture(on, full=None)` | Payload capture, process-wide |
+| `set_capture(on, full=None, text=None)` | Payload capture, process-wide. `text=False` keeps detection without storing readable payloads |
 | `set_detectors(*detectors)` | Replace the detector set; pass nothing to disable detection |
 | `set_suspect_signals(*names)` | Which signals mark a node suspect |
 | `configure(capacity, pinned_capacity)` | Replace the buffer |
 | `start_writer(path, …)` / `stop_writer()` / `flush()` | JSONL streaming |
 | `reset()` | Drop everything recorded and restore defaults |
 
-Environment: `WEBR_ENABLED`, `WEBR_CAPTURE`, `WEBR_CAPTURE_FULL`.
+Environment: `WEBR_ENABLED`, `WEBR_CAPTURE`, `WEBR_CAPTURE_FULL`, `WEBR_CAPTURE_TEXT`.
+
+### Logging
+
+When webR itself has a problem — a buffer that raises, a writer that cannot reach disk, a
+detector that throws — it reports on the `webrtrace` logger at `WARNING`, once per
+condition rather than once per node. It installs **no handlers**: a library that configures
+logging hijacks output it does not own. To see it:
+
+```python
+logging.getLogger("webrtrace").addHandler(logging.StreamHandler())
+```
+
+Nothing is ever printed to stdout or stderr directly, so webR cannot corrupt a program
+whose stdout is a data stream.
+
+⚠️ **Default capture stores real content.** A prompt under 400 characters is kept verbatim,
+longer ones keep their first and last 200 characters, and `novel_numbers` copies the
+figures it finds into `signals`. If you handle data you may not retain, use
+`set_capture(True, text=False)` — detection still runs, nothing readable is stored. See
+[SECURITY.md](SECURITY.md).
 
 ### Export
 
@@ -408,6 +490,9 @@ be wrong:
 - [ADR 0002 — Detection runs inline](docs/adr/0002-inline-detection.md): why the original
   plan to run detectors on the writer thread proved impossible, and what benchmarking
   revealed about the cost.
+- [ADR 0003 — Tokens and instrumentation](docs/adr/0003-tokens-and-instrumentation.md):
+  why usage is tokens rather than cost, why instrumentation is an explicit wrapper rather
+  than an import hook, and why detection had to stop assuming text.
 
 Zero runtime dependencies, deliberately. A tracing library that drags packages into your
 environment is one people decline to add.

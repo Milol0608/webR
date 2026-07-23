@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 #: Hard ceiling on how much text any detector reads, in characters.
@@ -88,7 +88,11 @@ _REFUSAL_PHRASES = (
 #: Signals that on their own justify marking a node suspect. Deliberately conservative:
 #: `novel_numbers` fires often and legitimately (a node that computes a total is supposed
 #: to produce a number nobody passed in), so it informs rather than accuses.
-DEFAULT_SUSPECT_SIGNALS = frozenset({"empty_output", "refusal", "json_invalid"})
+#:
+#: `nan` and `infinite` join them because an undefined number is never a correct result,
+#: whatever the domain. `all_zeros` and `empty_collection` do not: an empty result list is
+#: frequently the right answer.
+DEFAULT_SUSPECT_SIGNALS = frozenset({"empty_output", "refusal", "json_invalid", "nan", "infinite"})
 
 
 class Payloads:
@@ -340,6 +344,138 @@ def detect_input_overlap(payloads: Payloads) -> Mapping[str, Any] | None:
     return {"input_overlap": round(len(output_set & input_set) / len(union), 3)}
 
 
+# --- non-text payloads --------------------------------------------------------------
+#
+# The detectors above read strings, which leaves a numeric or structured agent with the
+# DAG and validators but no automatic signals at all. These close that gap.
+#
+# The framing that makes them belong here: the problem is not "hallucination", it is **a
+# component returning a wrong answer without failing**. A NaN propagating through a
+# pipeline, an all-zero embedding, a confidence outside [0, 1] -- none of them raise, and
+# all of them are the same shape of bug as a fabricated number in prose.
+
+
+def _numbers_in(value: Any) -> Iterator[float]:
+    """Yield the floats reachable in a value, bounded, without importing numpy.
+
+    Handles scalars, sequences, mappings, and one level of nesting -- enough for the
+    embeddings, score dicts, and record lists agents actually pass. Arrays from numpy and
+    friends are read through the sequence protocol they already implement.
+    """
+    if isinstance(value, bool):
+        return  # a bool is an int in Python, and "True is out of range" is nonsense
+    if isinstance(value, (int, float)):
+        yield float(value)
+        return
+    if isinstance(value, Mapping):
+        items: Iterable[Any] = value.values()
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = value
+    elif hasattr(value, "tolist"):  # numpy-like, without importing numpy
+        try:
+            items = value.tolist()
+            if isinstance(items, (int, float)):
+                yield float(items)
+                return
+        except Exception:
+            return
+    else:
+        return
+
+    count = 0
+    for item in items:
+        for number in _numbers_in(item):
+            yield number
+            count += 1
+            if count >= MAX_NUMBERS_SCANNED:
+                return
+
+
+#: Ceiling on how many numbers a value detector reads, mirroring the text bounds above.
+MAX_NUMBERS_SCANNED = 10_000
+
+
+def detect_nan(inputs: Mapping[str, Any], output: Any) -> Mapping[str, Any] | None:
+    """NaN or infinity in the output -- a computation that silently went undefined."""
+    for number in _numbers_in(output):
+        if number != number:  # NaN is the only value not equal to itself
+            return {"nan": True}
+        if number in (float("inf"), float("-inf")):
+            return {"infinite": True}
+    return None
+
+
+def detect_all_zeros(inputs: Mapping[str, Any], output: Any) -> Mapping[str, Any] | None:
+    """An all-zero vector: the usual shape of an embedding or feature call that failed."""
+    numbers = list(_numbers_in(output))
+    if len(numbers) >= 2 and all(number == 0.0 for number in numbers):
+        return {"all_zeros": len(numbers)}
+    return None
+
+
+def detect_empty_collection(inputs: Mapping[str, Any], output: Any) -> Mapping[str, Any] | None:
+    """An empty container returned where the caller expected results."""
+    if isinstance(output, (list, tuple, set, frozenset, dict)) and len(output) == 0:
+        return {"empty_collection": type(output).__name__}
+    return None
+
+
+def detect_unchanged_value(inputs: Mapping[str, Any], output: Any) -> Mapping[str, Any] | None:
+    """Output equal to an input: the node did nothing to the value.
+
+    Equality rather than identity here, deliberately, and unlike `link()`. A transform
+    that returns a distinct-but-identical object has still done nothing, which is the
+    thing worth reporting.
+    """
+    if output is None:
+        return None
+    for name, value in inputs.items():
+        try:
+            if type(value) is type(output) and value == output:
+                return {"unchanged_value": name}
+        except Exception:  # __eq__ on a user type is allowed to be exotic
+            continue
+    return None
+
+
+#: Detectors that read raw values rather than text. Run only when a node has no text
+#: payload, so a prose-returning agent never pays for them.
+VALUE_DETECTORS: tuple[Any, ...] = (
+    detect_nan,
+    detect_all_zeros,
+    detect_empty_collection,
+    detect_unchanged_value,
+)
+
+for _detector, _name in zip(
+    VALUE_DETECTORS,
+    ("nan", "all_zeros", "empty_collection", "unchanged_value"),
+    strict=True,
+):
+    _detector.name = _name
+
+
+def run_value_detectors(
+    inputs: Mapping[str, Any],
+    output: Any,
+    detectors: tuple[Any, ...] = VALUE_DETECTORS,
+) -> dict[str, Any]:
+    """Run the non-text detectors. Contained exactly like `run_detectors`."""
+    signals: dict[str, Any] = {}
+    failures: list[str] = []
+    for detector in detectors:
+        try:
+            reported = detector(inputs, output)
+        except Exception as exc:  # a broken heuristic must not break the traced program
+            failures.append(f"{getattr(detector, 'name', detector)}: {exc!r}")
+            continue
+        if reported:
+            signals.update(reported)
+    if failures:
+        signals["detector_errors"] = failures
+    return signals
+
+
 #: Every built-in, in the order they run.
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     detect_empty_output,
@@ -381,6 +517,23 @@ def run_detectors(
         signals["detection_truncated"] = True
     if failures:
         signals["detector_errors"] = failures
+    return signals
+
+
+#: Signals whose *value* is copied out of the payload rather than derived from it. With
+#: text storage disabled these are reduced to counts and booleans, so enabling detection
+#: never becomes a side channel that reintroduces the content you chose not to keep.
+_VALUE_BEARING_SIGNALS = ("novel_numbers", "refusal")
+
+
+def strip_payload_values(signals: dict[str, Any]) -> dict[str, Any]:
+    """Reduce signals that quote the payload to non-quoting equivalents."""
+    if "novel_numbers" in signals:
+        # The count already carries the diagnostic weight; the figures themselves were
+        # lifted verbatim out of the output.
+        signals["novel_numbers"] = f"{len(signals['novel_numbers'])} redacted"
+    if "refusal" in signals:
+        signals["refusal"] = True
     return signals
 
 

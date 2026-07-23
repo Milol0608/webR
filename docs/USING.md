@@ -304,6 +304,88 @@ indicative rather than authoritative on those nodes.
 
 ---
 
+## My agent doesn't return text
+
+Embedders, scorers, retrievers, and feature transforms return vectors, floats, and lists.
+The lexical detectors are useless on those, so when a node's output has no text
+representation webR runs a value pass instead: `nan`, `infinite`, `all_zeros`,
+`empty_collection`, `unchanged_value`.
+
+```python
+@webR_node
+def embed(text: str) -> list[float]:
+    ...            # returns [0.0] * 1536 when the provider call quietly failed
+```
+
+That node is flagged `all_zeros: 1536`. A dead embedding is a silent failure of exactly
+the kind an exception-based tool never sees: the vector is the right shape, the pipeline
+carries on, and retrieval returns garbage two stages later.
+
+The gate is the **output**, not the whole call. `embed("a prompt")` has text going in and a
+vector coming out; the value pass still runs. A prose agent never pays for it.
+
+`nan` and `infinite` mark the node suspect. `all_zeros`, `empty_collection`, and
+`unchanged_value` do not — an empty result list is often the correct answer, and a flag
+that fires on correct answers is one people learn to ignore. Promote them per pipeline:
+
+```python
+webrtrace.set_suspect_signals("nan", "infinite", "all_zeros", "refusal")
+```
+
+---
+
+## Where did the tokens go
+
+```python
+client = webrtrace.instrument(Anthropic())
+```
+
+Each provider call becomes a node with `usage`: model, input and output tokens, both cache
+counters, and `stop_reason`. Since nodes carry a parent chain, the cost of one agent
+*including everything it delegated to* is a walk of its subtree.
+
+Two things to look for, neither of which raises:
+
+- **`stop_reason: "refusal"`** — a billed call that returned no content. Recorded as
+  suspect, with the reason in `signals["suspect"]`.
+- **`stop_reason: "max_tokens"`** — the answer was cut off mid-thought and passed
+  downstream as if complete. Also suspect.
+
+`cache_read_input_tokens` is kept separate from `input_tokens` deliberately: they are
+priced differently, and folding them together would understate a cold run and overstate a
+warm one. webR does not convert any of this to money — multiply by your own rates.
+
+Not on a supported SDK? Report it yourself from inside the traced call:
+
+```python
+from webrtrace import Usage
+
+@webR_node
+def call_local_model(prompt: str) -> str:
+    result = my_runtime.generate(prompt)
+    webrtrace.record_usage(Usage(model="llama-3-8b",
+                                 input_tokens=result.n_prompt,
+                                 output_tokens=result.n_gen))
+    return result.text
+```
+
+---
+
+## webR is doing something odd and I want to see why
+
+webR never prints. Its own faults — a buffer that raises, a writer that cannot reach disk,
+a detector that throws — go to the `webrtrace` logger at `WARNING`, once per condition:
+
+```python
+import logging
+logging.getLogger("webrtrace").addHandler(logging.StreamHandler())
+logging.getLogger("webrtrace").setLevel(logging.WARNING)
+```
+
+If tracing seems to be missing nodes, this is the first thing to turn on.
+
+---
+
 ## When the web is incomplete
 
 Every export reports its own gaps. Read them before drawing conclusions:
@@ -339,7 +421,7 @@ you are now losing failures too.
 
 ## When webR is too slow
 
-Overhead is ~4.5µs per call without capture, and ~80µs on a 1KB payload with it.
+Overhead is ~12µs per call without capture, and ~214µs on a 1KB payload with it.
 
 - Against an LLM call, that is a rounding error. Leave it on.
 - Against a tight pure-Python loop, it is not. Narrow it:

@@ -26,19 +26,23 @@ from .records import next_seq
 
 
 class NodeState:
-    """The one mutable thing about a node while it runs.
+    """The mutable part of a node while it runs.
 
     A node cannot know at its own start whether it will end up tainted -- that depends on
     a descendant failing later. And a parent finishes *after* its children, so a child
     that fails must be able to mark parents that have not completed yet. `NodeRef` stays
     frozen (it is copied across contexts and must never be rebound); this small mutable
-    companion carries the one flag that legitimately changes.
+    companion carries what legitimately changes mid-call.
+
+    `usage` lands here the same way: an instrumented model call learns its token counts
+    only once the provider responds, which is partway through the node it belongs to.
     """
 
-    __slots__ = ("tainted",)
+    __slots__ = ("tainted", "usage")
 
     def __init__(self) -> None:
         self.tainted = False
+        self.usage: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +224,24 @@ class ContextVarPropagator:
 
 
 _propagator: Propagator = ContextVarPropagator()
+
+
+def record_usage(usage: Any) -> bool:
+    """Attach token counts to the node currently executing. Returns whether it landed.
+
+    Called by instrumentation once a provider responds, and usable directly for a client
+    webR does not wrap:
+
+        webrtrace.record_usage(webrtrace.Usage(model="...", input_tokens=1204))
+
+    Returns False outside a traced call rather than raising -- missing usage is a gap in
+    the trace, never a reason to break the program being traced.
+    """
+    current = _propagator.current()
+    if current is None:
+        return False
+    current.state.usage = usage
+    return True
 
 
 def inject() -> dict[str, str]:

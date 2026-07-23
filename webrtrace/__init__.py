@@ -18,7 +18,13 @@ from ._ids import new_node_id, new_trace_id
 from .buffer import DEFAULT_CAPACITY, DEFAULT_PINNED_CAPACITY, TraceBuffer
 from .collapse import collapse_by_agent
 from .decorator import submit, webR_node
-from .detectors import DEFAULT_DETECTORS, DEFAULT_SUSPECT_SIGNALS, Detector, Payloads
+from .detectors import (
+    DEFAULT_DETECTORS,
+    DEFAULT_SUSPECT_SIGNALS,
+    VALUE_DETECTORS,
+    Detector,
+    Payloads,
+)
 from .fingerprint import fingerprint
 from .graph import (
     SCHEMA_VERSION,
@@ -27,6 +33,7 @@ from .graph import (
     load_jsonl,
     write_graph,
 )
+from .instrument import instrument, usage_from_response
 from .links import Link, clear_marks, link, mark, mark_count, origin
 from .propagation import (
     ContextVarPropagator,
@@ -35,10 +42,11 @@ from .propagation import (
     get_propagator,
     inject,
     new_root,
+    record_usage,
     remote_parent,
     set_propagator,
 )
-from .records import EdgeKind, EdgeRecord, ErrorInfo, NodeRecord, NodeStatus
+from .records import EdgeKind, EdgeRecord, ErrorInfo, NodeRecord, NodeStatus, Usage
 from .redaction import REDACTED, Redactor, common_secrets
 from .render import (
     failure_chains,
@@ -50,6 +58,7 @@ from .render import (
 )
 from .runtime import (
     configure,
+    default_trace_path,
     disable,
     enable,
     flush,
@@ -76,6 +85,7 @@ __all__ = [
     "DEFAULT_SUSPECT_SIGNALS",
     "REDACTED",
     "SCHEMA_VERSION",
+    "VALUE_DETECTORS",
     "ContextVarPropagator",
     "Detector",
     "EdgeKind",
@@ -90,11 +100,13 @@ __all__ = [
     "Propagator",
     "Redactor",
     "TraceBuffer",
+    "Usage",
     "__version__",
     "clear_marks",
     "collapse_by_agent",
     "common_secrets",
     "configure",
+    "default_trace_path",
     "disable",
     "enable",
     "export_graph",
@@ -106,6 +118,7 @@ __all__ = [
     "get_writer",
     "graph_from_jsonl",
     "inject",
+    "instrument",
     "is_enabled",
     "link",
     "load_jsonl",
@@ -115,6 +128,7 @@ __all__ = [
     "new_root",
     "new_trace_id",
     "origin",
+    "record_usage",
     "remote_parent",
     "render",
     "render_failures",
@@ -131,6 +145,7 @@ __all__ = [
     "start_writer",
     "stop_writer",
     "submit",
+    "usage_from_response",
     "webR_node",
     "write_graph",
 ]

@@ -213,7 +213,7 @@ In dependency order — each depends only on those above it.
 | `records.py` | `NodeRecord`, `EdgeRecord`, enums | Frozen, slotted, JSON-ready. `is_interesting` is what drives retention |
 | `fingerprint.py` | Bounded payload summaries | The **hash** is the useful part: same hash means the content passed through untouched |
 | `propagation.py` | `NodeRef`, `NodeState`, `Propagator` | The decorator never touches `contextvars` directly — it goes through `Propagator`, which is what makes propagation replaceable |
-| `detectors.py` | Eight lexical signals | Limits apply to the text *before* the scan, not to the results — read via `scanned_output`/`scanned_input`, never the raw payload |
+| `detectors.py` | Eight lexical signals, four value signals | Limits apply to the text *before* the scan, not to the results — read via `scanned_output`/`scanned_input`, never the raw payload. The value detectors run only when the *output* had no text |
 | `buffer.py` | Bounded retention | Ring + pinned, both capped |
 | `writer.py` | JSONL on a daemon thread | Daemon + `atexit`, and it survives write failures rather than dying |
 | `runtime.py` | Process-wide state, `emit()` | One place where a record fans out to every sink |
@@ -222,6 +222,7 @@ In dependency order — each depends only on those above it.
 | `graph.py` | Graph documents | Reports its own gaps: `dropped`, `dangling_edges` |
 | `redaction.py` | Scrubbing payloads | Fails closed — a redactor that raises drops the payload rather than recording it |
 | `collapse.py` | Per-agent aggregate view | A *view*, not a trace: ids are synthetic and durations are sums. The worst status always wins |
+| `instrument.py` | Provider-SDK wrapper | A proxy, not a monkey-patch. Imports no SDK; reads the response shape defensively. Sync-vs-async is decided at wrap time, never by calling |
 | `render.py` | Terminal output | ASCII only, on purpose |
 | `__main__.py` | `python -m webrtrace` | Reads a file or a directory |
 
@@ -239,6 +240,9 @@ In dependency order — each depends only on those above it.
 | Daemon thread + `atexit` | Non-daemon thread | Python joins non-daemon threads *before* running `atexit` handlers, and this loop only stops when an `atexit` handler says so — the interpreter would hang |
 | `flush()`, not `fsync()` | fsync per failed node | Milliseconds on the path that is already going badly. flush survives a process crash, which is the actual scenario |
 | Zero dependencies | `pydantic` for the record schema | Saves ~50 lines and costs adoption. People decline to add a debugging library that drags in packages |
+| `instrument(client)` wrapper | Patch the SDK on import | Genuinely zero-touch, and it mutates a module webR does not own — the one thing this library promises never to do. It also breaks confusingly when SDK internals move |
+| Tokens recorded, cost not | A price table per model | Prices change and vary by contract. A hardcoded table is wrong the week after it ships, and quietly |
+| `logging` for webR's own faults | `print` to stderr | stderr is the application's, and a program whose stdout is a data stream should not have a tracing library writing into its output |
 
 ---
 

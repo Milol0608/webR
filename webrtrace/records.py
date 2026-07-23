@@ -73,6 +73,56 @@ class ErrorInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """What a model call consumed.
+
+    Typed fields rather than a corner of `attributes`, because the whole point is to be
+    able to *sum* these across a run -- per agent, per trace, per model. An untyped dict
+    with stringly-typed values cannot be aggregated reliably.
+
+    **webR records tokens and never computes cost.** A bundled price table is wrong within
+    months, and prices vary by provider, region, tier, and promotion. Cache tokens are kept
+    separate precisely because they are priced differently from ordinary input.
+    """
+
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    stop_reason: str | None = None
+
+    @property
+    def total_tokens(self) -> int:
+        """Every token this call was billed for, cache reads and writes included."""
+        return sum(
+            value or 0
+            for value in (
+                self.input_tokens,
+                self.output_tokens,
+                self.cache_creation_input_tokens,
+                self.cache_read_input_tokens,
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Only the fields that were actually reported; absent is not the same as zero."""
+        out: dict[str, Any] = {}
+        for field_name in (
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "stop_reason",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                out[field_name] = value
+        return out
+
+
+@dataclass(frozen=True, slots=True)
 class NodeRecord:
     """One completed invocation of an instrumented callable."""
 
@@ -91,6 +141,9 @@ class NodeRecord:
     # Populated from milestone 4 onward.
     io: dict[str, Any] | None = None
     signals: dict[str, Any] | None = None
+    # Present only on model calls; absent everywhere else, so older readers degrade
+    # rather than break.
+    usage: Usage | None = None
 
     @property
     def is_interesting(self) -> bool:
@@ -124,6 +177,8 @@ class NodeRecord:
             out["io"] = self.io
         if self.signals is not None:
             out["signals"] = self.signals
+        if self.usage is not None:
+            out["usage"] = self.usage.to_dict()
         return out
 
 

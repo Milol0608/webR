@@ -27,6 +27,11 @@ _HIGHLIGHT_SIGNALS = (
     "novel_numbers",
     "repetition",
     "input_overlap",
+    "nan",
+    "infinite",
+    "all_zeros",
+    "empty_collection",
+    "unchanged_value",
     "detection_truncated",
 )
 
@@ -58,6 +63,23 @@ def _signal_summary(node: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+#: Token counts a provider reported, in the order they read best. Cache reads are shown
+#: separately from ordinary input because they are priced differently -- summing them into
+#: one figure would understate a cold run and overstate a warm one.
+_TOKEN_FIELDS = (
+    ("input_tokens", "in"),
+    ("output_tokens", "out"),
+    ("cache_read_input_tokens", "cached"),
+    ("cache_creation_input_tokens", "cache-write"),
+)
+
+
+def _token_summary(node: dict[str, Any]) -> str:
+    usage = node.get("usage") or {}
+    parts = [f"{label} {usage[key]}" for key, label in _TOKEN_FIELDS if usage.get(key)]
+    return f"[{', '.join(parts)}]" if parts else ""
+
+
 def _describe(node: dict[str, Any], width: int) -> str:
     mark = STATUS_MARKS.get(node.get("status", ""), "[ ? ]")
     # Taint is a property of a node's *inputs*, not its own outcome, so it gets its own
@@ -84,6 +106,9 @@ def _describe(node: dict[str, Any], width: int) -> str:
             line += f"  ({', '.join(parts)})"
         return line.rstrip()
 
+    tokens = _token_summary(node)
+    if tokens:
+        line += f"  {tokens}"
     error = node.get("error")
     if error:
         line += f"  {error['type']}: {error['message']}"
@@ -159,16 +184,28 @@ def render_tree(document: dict[str, Any], *, name_width: int = 32) -> str:
 
 
 def render_links(document: dict[str, Any]) -> str:
-    """Render declared SENDS edges, which do not appear in the call tree at all."""
-    by_id = {node["node_id"]: node.get("name", "?") for node in document.get("nodes", [])}
+    """Render declared SENDS edges, which do not appear in the call tree at all.
+
+    Tolerates malformed edges. `load_jsonl` deliberately skips unparseable lines rather
+    than refusing to open a truncated file, so the renderer must be equally forgiving --
+    a post-mortem tool that crashes on a damaged trace fails exactly when it is needed.
+    """
+    by_id = {
+        node["node_id"]: node.get("name", "?")
+        for node in document.get("nodes", [])
+        if "node_id" in node
+    }
     sends = [edge for edge in document.get("edges", []) if edge.get("kind") == "sends"]
     if not sends:
         return ""
 
     lines = []
     for edge in sends:
-        source = by_id.get(edge["src_id"], f"<evicted {edge['src_id'][:8]}>")
-        target = by_id.get(edge["dst_id"], f"<evicted {edge['dst_id'][:8]}>")
+        src_id, dst_id = edge.get("src_id"), edge.get("dst_id")
+        if src_id is None or dst_id is None:
+            continue
+        source = by_id.get(src_id, f"<evicted {str(src_id)[:8]}>")
+        target = by_id.get(dst_id, f"<evicted {str(dst_id)[:8]}>")
         label = f" ({edge['label']})" if edge.get("label") else ""
         flag = "  [dangling]" if edge.get("dangling") else ""
         lines.append(f"  {source} => {target}{label}{flag}")

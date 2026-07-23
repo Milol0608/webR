@@ -21,7 +21,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
-import sys
+import logging
 import traceback
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
@@ -31,10 +31,19 @@ from time import perf_counter_ns
 from typing import Any, TypeVar
 
 from . import redaction, runtime
-from .detectors import is_suspect, run_detectors
+from .detectors import (
+    is_suspect,
+    run_detectors,
+    run_value_detectors,
+    strip_payload_values,
+)
 from .fingerprint import as_text, fingerprint
 from .propagation import NodeRef, get_propagator, new_root
 from .records import ErrorInfo, NodeOpen, NodeRecord, NodeStatus, now_unix_ns
+
+#: Never configured with a handler here -- that is the application's decision, and a
+#: library that installs handlers hijacks output it does not own.
+logger = logging.getLogger("webrtrace")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -54,6 +63,7 @@ class _Spec:
     attributes: dict[str, Any] | None
     capture: bool | tuple[str, ...] | None
     capture_full: bool | None
+    capture_text: bool | None
     check: Callable[[Any], Any] | None
     redactor: redaction.Redactor | None
     param_names: tuple[str, ...]
@@ -64,6 +74,9 @@ class _Spec:
 
     def wants_full(self) -> bool:
         return runtime.capture_full if self.capture_full is None else self.capture_full
+
+    def wants_text(self) -> bool:
+        return runtime.capture_text if self.capture_text is None else self.capture_text
 
 
 #: Innermost stack frames kept when rendering a traceback. The frames nearest the raise
@@ -173,6 +186,25 @@ def _collect_inputs(spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]) 
     return inputs
 
 
+def _collect_raw_inputs(
+    spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    """Argument values by parameter name, unconverted.
+
+    The text path deliberately keeps only `str`/`bytes`; the value detectors need what was
+    actually passed -- the array, the record, the score dict.
+    """
+    selected = spec.capture if isinstance(spec.capture, tuple) else None
+    raw: dict[str, Any] = {}
+    for name, value in zip(spec.param_names, args, strict=False):
+        if selected is None or name in selected:
+            raw[name] = value
+    for name, value in kwargs.items():
+        if selected is None or name in selected:
+            raw[name] = value
+    return raw
+
+
 def _validate(spec: _Spec, result: Any) -> str | None:
     """Run the user's validator. Returns a reason if the output looks wrong.
 
@@ -201,24 +233,22 @@ def _open(name: str) -> NodeRef:
     return parent.child(name) if parent is not None else new_root(name)
 
 
-_warned_tracing_failure = False
-
-
 def _warn_tracing_failure(exc: BaseException) -> None:
-    """Announce, once, that webR's own machinery faulted and was contained.
+    """Report that webR's own machinery faulted and was contained.
 
     A fault here is swallowed rather than propagated -- tracing must never change what the
-    traced program does -- but silence would hide a broken sink or propagator, so the
-    first one is reported on stderr.
+    traced program does -- but silence would hide a broken sink or propagator.
+
+    Goes to a logger, never to `print`. The host application owns its output: it decides
+    the level, the handler, and whether these appear at all. `logging` also handles the
+    de-duplication that a hand-rolled "warn once" flag used to approximate badly.
     """
-    global _warned_tracing_failure
-    if not _warned_tracing_failure:
-        _warned_tracing_failure = True
-        print(
-            f"webR: internal tracing error, suppressed to protect the traced program "
-            f"({type(exc).__name__}: {exc}). Records may be missing from here on.",
-            file=sys.stderr,
-        )
+    logger.warning(
+        "internal tracing error, suppressed to protect the traced program (%s: %s); "
+        "records may be missing from here on",
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _finish(
@@ -230,6 +260,7 @@ def _finish(
     spec: _Spec,
     inputs: dict[str, str] | None = None,
     result: Any = _NO_RESULT,
+    raw_inputs: dict[str, Any] | None = None,
 ) -> None:
     """Close a node: stop the clock, analyse, record, and propagate failure upward.
 
@@ -250,7 +281,7 @@ def _finish(
         except BaseException as detach_exc:  # a leaked contextvar is bad; a raise is worse
             _warn_tracing_failure(detach_exc)
     try:
-        _record_node(ref, started_unix_ns, duration_ns, exc, spec, inputs, result)
+        _record_node(ref, started_unix_ns, duration_ns, exc, spec, inputs, result, raw_inputs)
     except BaseException as record_exc:
         _warn_tracing_failure(record_exc)
 
@@ -263,6 +294,7 @@ def _record_node(
     spec: _Spec,
     inputs: dict[str, str] | None,
     result: Any,
+    raw_inputs: dict[str, Any] | None = None,
 ) -> None:
     """Build and emit the record. May raise; `_finish` contains it."""
     redactor = spec.redactor if spec.redactor is not None else runtime.redactor
@@ -292,17 +324,31 @@ def _record_node(
                 if output_text is None:
                     dropped.append("output")
 
+        store_text = spec.wants_text()
         if inputs or output_text is not None:
             io = {}
             if inputs:
-                io["inputs"] = {name: fingerprint(text, full=full) for name, text in inputs.items()}
+                io["inputs"] = {
+                    name: fingerprint(text, full=full, store_text=store_text)
+                    for name, text in inputs.items()
+                }
             if output_text is not None:
-                io["output"] = fingerprint(output_text, full=full)
+                io["output"] = fingerprint(output_text, full=full, store_text=store_text)
+            # Detectors always see the real text; only what is *stored* is restricted.
             signals = run_detectors(inputs, output_text, runtime.detectors)
+            if not store_text:
+                signals = strip_payload_values(signals)
 
         if dropped:
             # Say so rather than leaving a silent hole where a payload should be.
             signals["redaction_failed"] = sorted(dropped)
+
+        if output_text is None and result is not _NO_RESULT:
+            # The *output* has no text, so the lexical detectors had nothing to judge --
+            # even if the inputs were prose. Run the value detectors on it instead: NaN,
+            # all-zeros, an empty result, and unchanged passthrough are the same class of
+            # silent wrongness in a numeric agent as a fabricated figure is in prose.
+            signals.update(run_value_detectors(raw_inputs or {}, result))
 
     # A validator's verdict outranks a heuristic: the user knows what correct looks like.
     reason = _validate(spec, result) if exc is None and result is not _NO_RESULT else None
@@ -347,6 +393,7 @@ def _record_node(
             attributes=spec.attributes if spec.attributes is not None else {},
             io=io,
             signals=signals or None,
+            usage=ref.state.usage,
         )
     )
 
@@ -375,6 +422,7 @@ def webR_node(
     attributes: dict[str, Any] | None = None,
     capture: bool | tuple[str, ...] | None = None,
     capture_full: bool | None = None,
+    capture_text: bool | None = None,
     check: Callable[[Any], Any] | None = None,
     redact: redaction.Redactor | None = None,
 ) -> F | Callable[[F], F]:
@@ -403,6 +451,10 @@ def webR_node(
             process-wide setting. Bounded by `fingerprint.MAX_FULL_CHARS`, but still the
             setting most likely to turn a trace file into a liability -- prompts contain
             customer data.
+        capture_text: `False` stores no readable payload at all -- lengths and hashes only,
+            and signals that quote the payload are reduced to counts. Detection still runs.
+            Use it for data you may not retain: the *default* stores a short payload in
+            full and the first and last 200 characters of a long one.
         check: A validator run on the return value. Return `True` to pass; return `False`,
             `None`, or a string reason to mark the node **suspect**. It never raises and
             never changes the returned value: a hallucination is a call that succeeded.
@@ -426,6 +478,7 @@ def webR_node(
             attributes=static_attributes,
             capture=capture,
             capture_full=capture_full,
+            capture_text=capture_text,
             check=check,
             redactor=redact,
             param_names=_parameter_names(func),
@@ -487,30 +540,38 @@ def _begin(spec: _Spec, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     failure cannot leave the contextvar attached with no one to detach it.
     """
     try:
-        inputs = _collect_inputs(spec, args, kwargs) if spec.wants_capture() else None
+        capturing = spec.wants_capture()
+        inputs = _collect_inputs(spec, args, kwargs) if capturing else None
+        # Raw values, for the non-text detectors. Held only until `_finish` runs, which is
+        # inside the wrapper frame that already holds these arguments -- no new retention.
+        raw_inputs = _collect_raw_inputs(spec, args, kwargs) if capturing else None
         ref = _open(spec.name)
         token = get_propagator().attach(ref)
         started_unix = now_unix_ns()
         # A start marker to the durable stream, so a node that never returns (a hang, a
         # killed process) still appears -- as `running` -- instead of vanishing and
-        # letting the trace blame whatever did finish. Writer-only, and a no-op when no
-        # writer is running.
-        parent = ref.parent
-        runtime.emit_open(
-            NodeOpen(
-                trace_id=ref.trace_id,
-                node_id=ref.node_id,
-                parent_id=parent.node_id if parent is not None else None,
-                name=ref.name,
-                seq=ref.seq,
-                started_unix_ns=started_unix,
-                depth=ref.depth,
+        # letting the trace blame whatever did finish.
+        #
+        # The writer check comes *first*: building the marker unconditionally cost a
+        # dataclass allocation on every traced call even with no writer running, which
+        # measurably regressed the hot path for a record nobody would receive.
+        if runtime.get_writer() is not None:
+            parent = ref.parent
+            runtime.emit_open(
+                NodeOpen(
+                    trace_id=ref.trace_id,
+                    node_id=ref.node_id,
+                    parent_id=parent.node_id if parent is not None else None,
+                    name=ref.name,
+                    seq=ref.seq,
+                    started_unix_ns=started_unix,
+                    depth=ref.depth,
+                )
             )
-        )
     except BaseException as exc:
         _warn_tracing_failure(exc)
         return None
-    return ref, token, inputs, started_unix, perf_counter_ns()
+    return ref, token, inputs, started_unix, perf_counter_ns(), raw_inputs
 
 
 def _wrap_sync(func: Any, spec: _Spec) -> Any:
@@ -521,13 +582,13 @@ def _wrap_sync(func: Any, spec: _Spec) -> Any:
         began = _begin(spec, args, kwargs)
         if began is None:
             return func(*args, **kwargs)
-        ref, token, inputs, started_unix, started = began
+        ref, token, inputs, started_unix, started, raw_inputs = began
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
             _finish(ref, token, started_unix, started, exc, spec, inputs)
             raise
-        _finish(ref, token, started_unix, started, None, spec, inputs, result)
+        _finish(ref, token, started_unix, started, None, spec, inputs, result, raw_inputs)
         return result
 
     return wrapper
@@ -541,7 +602,7 @@ def _wrap_async(func: Any, spec: _Spec) -> Any:
         began = _begin(spec, args, kwargs)
         if began is None:
             return await func(*args, **kwargs)
-        ref, token, inputs, started_unix, started = began
+        ref, token, inputs, started_unix, started, raw_inputs = began
         try:
             result = await func(*args, **kwargs)
         except BaseException as exc:
@@ -549,7 +610,7 @@ def _wrap_async(func: Any, spec: _Spec) -> Any:
             # of silent disappearance this library exists to make visible.
             _finish(ref, token, started_unix, started, exc, spec, inputs)
             raise
-        _finish(ref, token, started_unix, started, None, spec, inputs, result)
+        _finish(ref, token, started_unix, started, None, spec, inputs, result, raw_inputs)
         return result
 
     return wrapper

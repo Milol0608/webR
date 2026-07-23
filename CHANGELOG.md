@@ -3,6 +3,52 @@
 Notable changes to webR. This project follows [Semantic Versioning](https://semver.org/);
 while the major version is `0`, the public API may change between minor releases.
 
+## [Unreleased]
+
+### Added
+
+- **Token accounting** — a `Usage` record on every node (`model`, `input_tokens`,
+  `output_tokens`, both cache counters, `stop_reason`), reported by `record_usage()` from
+  inside any traced call. Cache tokens stay separate from ordinary input because they are
+  priced differently. Tokens are recorded, not dollars: prices change and vary by contract,
+  and a hardcoded table is wrong the week after it ships.
+- **Provider instrumentation** — `instrument(client)` wraps an Anthropic sync or async
+  client so `messages.create` / `.stream` / `.parse` / `.count_tokens` become nodes without
+  decorating a single call site. An explicit wrapper rather than an import-time patch, and
+  a streaming call keeps its node open across the whole `with` block because usage only
+  arrives when the stream ends. No SDK is imported; webR still has zero runtime
+  dependencies, and unrecognised methods proxy straight through untraced.
+- **Refusals and truncation are suspect** — `stop_reason: "refusal"` is a *successful*,
+  billed call that returned no content, and `max_tokens` is an answer cut off mid-thought
+  and passed on as complete. Both are now flagged.
+- **Value detectors for non-text agents** — when a call's *output* has no text
+  representation, `nan`, `infinite`, `all_zeros`, `empty_collection`, and
+  `unchanged_value` run in place of the lexical pass, so embedders, scorers, and feature
+  transforms are covered. Only `nan` and `infinite` mark a node suspect; an empty result
+  list is frequently correct. Number scanning is bounded at 10,000 values per node, and
+  `bool` is excluded from the numeric checks since it subclasses `int`.
+- [ADR 0003](docs/adr/0003-tokens-and-instrumentation.md) recording all five decisions.
+
+### Changed
+
+- **webR's own faults go to the `webrtrace` logger**, at `WARNING`, once per condition,
+  instead of `print`. No handler is installed — a library that configures logging hijacks
+  output it does not own — and nothing is written to stdout or stderr directly, so webR
+  cannot corrupt a program whose stdout is a data stream.
+- `DEFAULT_SUSPECT_SIGNALS` gains `nan` and `infinite`. An undefined number is never a
+  correct result, in any domain.
+
+### Fixed
+
+- **An instrumented async client called the provider twice per call.** Sync-vs-async was
+  decided by invoking the sync path and checking whether the result was awaitable, which
+  issued a real request, discarded the coroutine, and then issued another — double billing
+  and two nodes per call. It is now decided at wrap time from the bound method. Never probe
+  by calling something with side effects.
+- The value detectors were gated on the whole call having no text, so an agent with a text
+  input and a numeric output — the shape of every embedder — got no detection at all. The
+  gate now keys off the output alone.
+
 ## [0.1.0] — 2026-07-21
 
 First public release.
@@ -68,6 +114,25 @@ portability) attacked the package with runnable reproductions. Regression tests 
   parents shared a name.
 - `seq` was completion order while documented and used as invocation order.
 
+**Portability and data handling**
+- Trace rotation used `Path.rename`, which **silently replaces** an existing target on
+  POSIX (destroying a previous run's rotated trace) and **raises** on Windows (disabling
+  rotation, so the file grew unbounded). Rotation now probes for a free name, so neither
+  happens and runs no longer collide.
+- The default trace path was fixed, so two processes appended to one file with no locking
+  and destroyed each other's records. It is now `traces/webrtrace-<pid>.jsonl`.
+- `python -m webrtrace` crashed with `UnicodeEncodeError` on a Windows console using a
+  legacy code page when a node name contained non-ASCII characters.
+- `render` and `collapse_by_agent` raised `KeyError` on a document with a missing
+  `node_id` or edge endpoint — which `load_jsonl` can legitimately produce from a
+  truncated file, since it skips unparseable lines rather than refusing to open one.
+- **New: `set_capture(True, text=False)` / `capture_text=False`** keeps hallucination
+  detection while storing no readable payload — lengths and hashes only, with
+  value-quoting signals reduced to counts. This closed a real gap: the previous choices
+  were "store excerpts" (the default, which keeps a payload under 400 characters *in
+  full*) or "capture nothing", which lost detection too. Documented plainly in
+  `SECURITY.md`: the default is not a privacy control.
+
 **Performance cliffs on the failure path**
 - A deep traced failure was O(depth²): rendering the full traceback at every unwind level
   made a depth-2000 failure take **145 seconds**. The traceback is now rendered once, by
@@ -81,6 +146,9 @@ portability) attacked the package with runnable reproductions. Regression tests 
   **2.05GB**. A byte budget now caps it (measured 2050MB → 66MB).
 - A shutdown race discarded whole batches while `dropped` still read zero; each writer also
   leaked an `atexit` handler for the life of the process.
+- The writer held its only lock across `file.write()`, so `submit()` — and therefore every
+  traced call — blocked on the filesystem, despite a docstring promising it never blocks.
+  The queue and the file handle now have separate locks that are never held at once.
 
 ### Fixed before release
 
