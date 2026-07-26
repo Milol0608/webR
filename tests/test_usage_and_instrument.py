@@ -317,6 +317,85 @@ def test_value_detectors_do_not_run_when_there_is_text(buffer):
     assert "all_zeros" not in (by_name(buffer, "agent").signals or {})
 
 
+# --- second-review hardening (0.2.1) ------------------------------------------------
+
+
+def test_instrument_is_idempotent(buffer):
+    # Double-wrapping recorded two nodes and double the tokens for every single call --
+    # and wrapping twice is easy: once in a shared helper, once at the call site.
+    client = FakeClient()
+    once = webrtrace.instrument(client)
+    twice = webrtrace.instrument(once)
+    assert twice is once
+
+    twice.messages.create()
+    nodes = webrtrace.export_graph(buffer)["nodes"]
+    records = [n for n in nodes if n["name"] == "anthropic.messages.create"]
+    assert len(records) == 1
+    assert records[0]["usage"]["input_tokens"] == 120  # not 240
+
+
+def test_a_swapped_attribute_is_respected(buffer):
+    # The proxy cached wrappers forever, so after the app swapped client.messages
+    # (monkeypatching, retry logic rebuilding a resource) the instrumented client kept
+    # calling the *old* object -- a tracing wrapper changing program behaviour.
+    client = FakeClient()
+    traced = webrtrace.instrument(client)
+    traced.messages.create()
+
+    replacement = FakeMessages()
+    client.messages = replacement
+    traced.messages.create()
+    assert len(replacement.calls) == 1  # the live object got the call
+
+
+def test_record_usage_accumulates_across_calls_in_one_node(buffer):
+    # Last-write-wins silently dropped the first call's tokens: an undercount with no
+    # signal, in the feature whose whole job is counting.
+    @webR_node(name="agent")
+    def agent():
+        webrtrace.record_usage(Usage(model="a", input_tokens=1000, output_tokens=1))
+        webrtrace.record_usage(Usage(model="b", input_tokens=2000))
+        return "x"
+
+    agent()
+    usage = by_name(buffer, "agent").usage
+    assert usage.input_tokens == 3000
+    assert usage.output_tokens == 1  # absent in the second report is not zero
+    assert usage.model == "b"  # later non-None wins for the unsummable fields
+
+
+def test_usage_merge_keeps_absent_fields_absent():
+    merged = Usage(input_tokens=5).merged(Usage(input_tokens=3))
+    assert merged.output_tokens is None  # two absents stay absent, never become 0
+    assert merged.input_tokens == 8
+
+
+def test_instrumenting_an_unsupported_client_warns(buffer, caplog):
+    # A silent no-op meant a user believed tracing was on while every call passed
+    # through untraced. A library built to expose silent failures does not get to fail
+    # silently itself.
+    class ChatCompletions:
+        def create(self, **kwargs):
+            return "resp"
+
+    class Chat:
+        completions = ChatCompletions()
+
+    class OpenAIish:
+        chat = Chat()
+
+    with caplog.at_level(logging.WARNING, logger="webrtrace"):
+        webrtrace.instrument(OpenAIish())
+    assert any("untraced" in r.message for r in caplog.records)
+
+
+def test_instrumenting_a_supported_client_does_not_warn(buffer, caplog):
+    with caplog.at_level(logging.WARNING, logger="webrtrace"):
+        webrtrace.instrument(FakeClient())
+    assert not [r for r in caplog.records if "untraced" in r.message]
+
+
 # --- rendering ----------------------------------------------------------------------
 
 

@@ -358,9 +358,15 @@ def detect_input_overlap(payloads: Payloads) -> Mapping[str, Any] | None:
 def _numbers_in(value: Any) -> Iterator[float]:
     """Yield the floats reachable in a value, bounded, without importing numpy.
 
-    Handles scalars, sequences, mappings, and one level of nesting -- enough for the
-    embeddings, score dicts, and record lists agents actually pass. Arrays from numpy and
-    friends are read through the sequence protocol they already implement.
+    Handles scalars, sequences, mappings, and nested combinations of them, recursively --
+    enough for the embeddings, score dicts, and record lists agents actually pass. Arrays
+    from numpy and friends are read through `tolist()` without importing numpy. The count
+    is bounded by `MAX_NUMBERS_SCANNED`; pathological *depth* (a list nested thousands
+    deep) exhausts the recursion limit instead, which the per-detector containment turns
+    into a `detector_errors` signal rather than an escape into user code.
+
+    Deliberately does **not** iterate arbitrary iterables: consuming a generator the
+    program was about to read would corrupt the very data being traced.
     """
     if isinstance(value, bool):
         return  # a bool is an int in Python, and "True is out of range" is nonsense

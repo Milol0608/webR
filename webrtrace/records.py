@@ -92,6 +92,40 @@ class Usage:
     cache_read_input_tokens: int | None = None
     stop_reason: str | None = None
 
+    def merged(self, later: Usage) -> Usage:
+        """This usage plus a later report from the same node, token counts summed.
+
+        Exists because a node can legitimately bill twice -- an agent that calls two
+        models through an untraced helper, or retries. The naive behaviour was
+        last-write-wins, which silently *dropped* the earlier call's tokens from the
+        trace: an undercount with no signal anywhere, in the one feature whose entire
+        job is counting.
+
+        Counts sum (None-aware: absent is not zero, and two absents stay absent).
+        `model` and `stop_reason` cannot be summed, so the later non-None value wins --
+        the final stop reason is the one that describes how the node's work ended.
+        """
+
+        def add(a: int | None, b: int | None) -> int | None:
+            if a is None:
+                return b
+            if b is None:
+                return a
+            return a + b
+
+        return Usage(
+            model=later.model or self.model,
+            input_tokens=add(self.input_tokens, later.input_tokens),
+            output_tokens=add(self.output_tokens, later.output_tokens),
+            cache_creation_input_tokens=add(
+                self.cache_creation_input_tokens, later.cache_creation_input_tokens
+            ),
+            cache_read_input_tokens=add(
+                self.cache_read_input_tokens, later.cache_read_input_tokens
+            ),
+            stop_reason=later.stop_reason or self.stop_reason,
+        )
+
     @property
     def total_tokens(self) -> int:
         """Every token this call was billed for, cache reads and writes included."""

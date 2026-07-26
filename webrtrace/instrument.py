@@ -263,25 +263,36 @@ class _Proxy:
         object.__setattr__(self, "_cache", {})
 
     def __getattr__(self, name: str) -> Any:
-        cache = object.__getattribute__(self, "_cache")
-        if name in cache:
-            return cache[name]
-
         wrapped = object.__getattribute__(self, "_wrapped")
+        # Read through to the live attribute on every access. An earlier version cached
+        # the wrapper on first touch and returned it forever -- so when the application
+        # swapped `client.messages` (test monkeypatching, retry logic rebuilding a
+        # resource), the instrumented client silently kept calling the *old* object.
+        # A tracing wrapper that redirects the program to a dead object is changing the
+        # program's behaviour, which is the one thing this library must never do. The
+        # cache now keys on the identity of the underlying value: same object, same
+        # wrapper; swapped object, fresh wrapper.
+        value = getattr(wrapped, name)
+
+        cache = object.__getattribute__(self, "_cache")
+        hit = cache.get(name)
+        if hit is not None and hit[0] is value:
+            return hit[1]
+
         path = object.__getattribute__(self, "_path")
         methods = object.__getattribute__(self, "_methods")
-
-        value = getattr(wrapped, name)
         full = (*path, name)
 
         if full in methods:
-            value = _TracedMethod(value, methods[full])
+            wrapper = _TracedMethod(value, methods[full])
         elif any(candidate[: len(full)] == full for candidate in methods):
             # An intermediate namespace on the way to something traced.
-            value = _Proxy(value, full, methods)
+            wrapper = _Proxy(value, full, methods)
+        else:
+            wrapper = value
 
-        cache[name] = value
-        return value
+        cache[name] = (value, wrapper)
+        return wrapper
 
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(object.__getattribute__(self, "_wrapped"), name, value)
@@ -297,8 +308,46 @@ def instrument(client: Any, *, methods: dict | None = None) -> Any:
     recognise is proxied straight through, so an unfamiliar or newer SDK surface keeps
     working -- untraced rather than broken.
 
+    Idempotent: instrumenting an already-instrumented client returns it unchanged. The
+    naive alternative stacked two wrappers, which recorded **two nodes and double the
+    tokens for every single call** -- and wrapping twice is easy to do by accident, once
+    in a shared helper and once at the call site.
+
+    If *none* of the traced method paths exist on the client -- an OpenAI client handed
+    to the Anthropic map, say -- a warning is logged once. The alternative was a silent
+    no-op, where every call passes through untraced while the caller believes tracing is
+    on; a library built to expose silent failures does not get to fail silently itself.
+
     Args:
         client: The provider client to wrap.
         methods: Override the traced-method map, as `("attr", "path") -> node name`.
     """
-    return _Proxy(client, (), methods if methods is not None else _ANTHROPIC_METHODS)
+    if isinstance(client, _Proxy):
+        return client
+
+    table = methods if methods is not None else _ANTHROPIC_METHODS
+    try:
+        if not _any_path_resolves(client, table):
+            logger.warning(
+                "instrument(): none of the traced method paths %s exist on %s; "
+                "every call will pass through untraced. Pass methods= with the "
+                "correct attribute paths for this SDK.",
+                sorted({".".join(p) for p in table}),
+                type(client).__name__,
+            )
+    except Exception:  # a diagnostic must never break the wrap
+        pass
+    return _Proxy(client, (), table)
+
+
+def _any_path_resolves(client: Any, table: dict) -> bool:
+    """Whether at least one traced path leads to a callable on this client."""
+    for path in table:
+        obj: Any = client
+        for part in path:
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if callable(obj):
+            return True
+    return False

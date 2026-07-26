@@ -3,6 +3,40 @@
 Notable changes to webR. This project follows [Semantic Versioning](https://semver.org/);
 while the major version is `0`, the public API may change between minor releases.
 
+## [0.2.1] — 2026-07-23
+
+Integrity fixes from a second adversarial review, run against the published 0.2.0. All
+four were in the newest code — the surfaces that had shipped without their own break-it
+pass — which is its own lesson.
+
+### Fixed
+
+- **The `instrument()` proxy could redirect the program to a dead object.** Attribute
+  wrappers were cached forever, so when the application swapped `client.messages`
+  (monkeypatching in tests, retry logic rebuilding a resource) the instrumented client
+  silently kept calling the *old* object — a tracing wrapper changing the traced
+  program's behaviour, the one thing this library must never do. The cache now keys on
+  the identity of the live attribute: same object, same wrapper; swapped object, fresh
+  wrapper.
+- **Double-instrumentation double-counted.** `instrument(instrument(client))` recorded
+  two nodes and twice the tokens for every call. `instrument()` is now idempotent: an
+  already-instrumented client is returned unchanged.
+- **A second `record_usage()` in one node silently dropped the first.** Last-write-wins
+  undercounted any node that billed twice (two models through an untraced helper,
+  retries). Reports now accumulate: token counts sum None-aware (absent is not zero),
+  and `model`/`stop_reason` keep the later non-None value. `Usage.merged()` is public.
+- **`instrument()` on an unsupported SDK was a silent no-op.** An OpenAI client handed
+  to the Anthropic method map passed every call through untraced with no signal, while
+  the caller believed tracing was on. If no traced method path resolves to a callable, a
+  warning is now logged naming the paths that were tried.
+
+### Changed
+
+- Performance table re-measured on 0.2.1 and the `_numbers_in` docstring corrected (it
+  recurses through nesting, bounded by count, with pathological depth contained as
+  `detector_errors` — it never iterates arbitrary iterators, so it cannot consume a
+  generator the program was about to read).
+
 ## [0.2.0] — 2026-07-23
 
 The first release published to PyPI. Adds token accounting, provider instrumentation,

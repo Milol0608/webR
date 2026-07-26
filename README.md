@@ -379,11 +379,13 @@ Microseconds added per call, above the same function undecorated (Python 3.14):
 
 | payload chars | capture off | capture on |
 |--------------:|------------:|-----------:|
-| 0 | 11.7 | 27.8 |
-| 100 | 8.2 | 51.3 |
-| 1,000 | 11.8 | 213.6 |
-| 10,000 | 11.9 | 559.8 |
-| 100,000 | 12.6 | 1026.7 |
+| 0 | 10.8 | 27.6 |
+| 100 | 8.4 | 61.7 |
+| 1,000 | 10.7 | 204.2 |
+| 10,000 | 10.4 | 488.0 |
+| 100,000 | 12.1 | 892.2 |
+
+Measured on 0.2.1. Re-run before trusting them on your hardware.
 
 Reproduce with `python benchmarks/overhead.py` (minimum of several repeats, collector
 paused — a single timing run on a busy machine varies by 2–3x).

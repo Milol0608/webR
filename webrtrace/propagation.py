@@ -240,7 +240,19 @@ def record_usage(usage: Any) -> bool:
     current = _propagator.current()
     if current is None:
         return False
-    current.state.usage = usage
+    state = current.state
+    if state.usage is None:
+        state.usage = usage
+    else:
+        # A second report in the same node accumulates rather than overwrites. The
+        # overwrite behaviour silently dropped the first call's tokens -- an undercount
+        # with no signal, in the feature whose whole job is counting.
+        try:
+            state.usage = state.usage.merged(usage)
+        except Exception:
+            # An exotic usage object without merge semantics: keep the newest rather
+            # than break the traced call.
+            state.usage = usage
     return True
 
 
