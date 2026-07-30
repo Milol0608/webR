@@ -418,12 +418,19 @@ webrtrace.set_suspect_signals("nan", "infinite", "all_zeros", "refusal")
 ## Where did the tokens go
 
 ```python
-client = webrtrace.instrument(Anthropic())
+client = webrtrace.instrument(Anthropic())    # or instrument(OpenAI())
 ```
 
-Each provider call becomes a node with `usage`: model, input and output tokens, both cache
-counters, and `stop_reason`. Since nodes carry a parent chain, the cost of one agent
-*including everything it delegated to* is a walk of its subtree.
+Each provider call becomes a node with `usage`: model, input and output tokens, cache
+counters, and `stop_reason`. Anthropic and OpenAI clients are both recognised — by shape,
+not class, so OpenAI-compatible servers (LiteLLM proxy, vLLM, Together) work too, and
+OpenAI's `prompt_tokens`/`completion_tokens` land in the same `Usage` fields as
+Anthropic's counts, so a mixed pipeline sums cleanly. Since nodes carry a parent chain,
+the cost of one agent *including everything it delegated to* is a walk of its subtree.
+
+OpenAI-specific flags you get for free: `finish_reason: "length"` (truncated) and
+`"content_filter"` (output removed after generation, billed anyway) mark the node
+suspect, alongside Anthropic's `refusal` and `max_tokens`.
 
 Two things to look for, neither of which raises:
 

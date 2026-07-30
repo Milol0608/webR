@@ -47,6 +47,20 @@ _ANTHROPIC_METHODS = {
     ("beta", "messages", "create"): "anthropic.beta.messages.create",
 }
 
+_OPENAI_METHODS = {
+    ("chat", "completions", "create"): "openai.chat.completions.create",
+    ("chat", "completions", "parse"): "openai.chat.completions.parse",
+    ("responses", "create"): "openai.responses.create",
+    ("embeddings", "create"): "openai.embeddings.create",
+    ("completions", "create"): "openai.completions.create",
+}
+
+#: Tried in order when `instrument()` is not told which SDK it has. Detection is by
+#: shape -- which attribute paths actually resolve to callables -- not by module name,
+#: so mocks, fakes, and OpenAI-compatible proxies (LiteLLM's proxy server, vLLM,
+#: Together) are recognised the same way the real SDKs are.
+_METHOD_MAPS = (_ANTHROPIC_METHODS, _OPENAI_METHODS)
+
 #: `stop_reason` values that mean the call produced nothing useful despite succeeding.
 _EMPTY_STOP_REASONS = frozenset({"refusal"})
 
@@ -54,49 +68,99 @@ _EMPTY_STOP_REASONS = frozenset({"refusal"})
 def usage_from_response(response: Any) -> Usage | None:
     """Read model, tokens, and stop reason off a provider response.
 
-    Entirely duck-typed and defensive: a provider is free to change its response object,
-    and webR reading it must never be the thing that breaks a working call. Anything
-    missing or unreadable simply comes back as None.
+    Understands both response shapes in the wild: Anthropic's (`usage.input_tokens` /
+    `output_tokens`, top-level `stop_reason`) and OpenAI's (`usage.prompt_tokens` /
+    `completion_tokens`, `choices[0].finish_reason`; the newer Responses API reports
+    `input_tokens`/`output_tokens` and `status`/`incomplete_details` instead). LiteLLM
+    and most OpenAI-compatible servers mimic the OpenAI shape, so they are covered by
+    the same reads -- which is the whole reason this is duck-typed rather than keyed on
+    the SDK class.
+
+    Entirely defensive: a provider is free to change its response object, and webR
+    reading it must never be the thing that breaks a working call. Anything missing or
+    unreadable simply comes back as None.
     """
     try:
         raw = getattr(response, "usage", None)
         model = getattr(response, "model", None)
-        stop_reason = getattr(response, "stop_reason", None)
         if raw is None and model is None:
             return None
 
-        def field(name: str) -> int | None:
-            value = getattr(raw, name, None) if raw is not None else None
+        def field(obj: Any, name: str) -> int | None:
+            value = getattr(obj, name, None) if obj is not None else None
             return value if isinstance(value, int) else None
+
+        def first(*values: int | None) -> int | None:
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        # Cached-prompt tokens live one level down in OpenAI responses:
+        # chat completions -> usage.prompt_tokens_details.cached_tokens,
+        # Responses API   -> usage.input_tokens_details.cached_tokens.
+        details = getattr(raw, "prompt_tokens_details", None) or getattr(
+            raw, "input_tokens_details", None
+        )
 
         return Usage(
             model=model if isinstance(model, str) else None,
-            input_tokens=field("input_tokens"),
-            output_tokens=field("output_tokens"),
+            input_tokens=first(field(raw, "input_tokens"), field(raw, "prompt_tokens")),
+            output_tokens=first(field(raw, "output_tokens"), field(raw, "completion_tokens")),
             # Cache tokens are priced differently from ordinary input, so they are kept
             # separate rather than folded into the input count.
-            cache_creation_input_tokens=field("cache_creation_input_tokens"),
-            cache_read_input_tokens=field("cache_read_input_tokens"),
-            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+            cache_creation_input_tokens=field(raw, "cache_creation_input_tokens"),
+            cache_read_input_tokens=first(
+                field(raw, "cache_read_input_tokens"), field(details, "cached_tokens")
+            ),
+            stop_reason=_stop_reason_of(response),
         )
     except Exception:  # reading a response must never break the call that produced it
         return None
 
 
-def _check_response(response: Any) -> bool | str:
-    """Validator: flag a call that succeeded while producing nothing.
+def _stop_reason_of(response: Any) -> str | None:
+    """The one string that says how generation ended, wherever this provider keeps it."""
+    stop = getattr(response, "stop_reason", None)  # Anthropic
+    if isinstance(stop, str):
+        return stop
+    choices = getattr(response, "choices", None)  # OpenAI chat/completions
+    if choices:
+        finish = getattr(choices[0], "finish_reason", None)
+        if isinstance(finish, str):
+            return finish
+    status = getattr(response, "status", None)  # OpenAI Responses API
+    if status == "incomplete":
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None)
+        return reason if isinstance(reason, str) else "incomplete"
+    return None
 
-    A `refusal` returns HTTP 200 with an empty `content` list. Nothing raises, the caller
-    is billed, and a pipeline that only checks for exceptions carries the empty result
-    forward as if it were an answer.
+
+def _check_response(response: Any) -> bool | str:
+    """Validator: flag a call that succeeded while producing nothing, or half of something.
+
+    Every branch here is an HTTP 200 the caller was billed for. Nothing raises, and a
+    pipeline that only checks for exceptions carries the result forward as if it were a
+    complete answer:
+
+    - Anthropic `refusal`: empty `content`, politely.
+    - Anthropic `max_tokens` / OpenAI `length` / Responses-API `max_output_tokens`: the
+      answer was cut off mid-thought.
+    - OpenAI `content_filter`: the output was removed after generation -- truncated or
+      empty, and still billed.
     """
-    stop_reason = getattr(response, "stop_reason", None)
-    if isinstance(stop_reason, str) and stop_reason in _EMPTY_STOP_REASONS:
+    stop_reason = _stop_reason_of(response)
+    if not isinstance(stop_reason, str):
+        return True
+    if stop_reason in _EMPTY_STOP_REASONS:
         details = getattr(response, "stop_details", None)
         category = getattr(details, "category", None)
         return f"model declined the request (stop_reason={stop_reason}, category={category})"
-    if stop_reason == "max_tokens":
-        return "response truncated at max_tokens"
+    if stop_reason in ("max_tokens", "length", "max_output_tokens"):
+        return f"response truncated ({stop_reason})"
+    if stop_reason == "content_filter":
+        return "output removed by the provider's content filter (finish_reason=content_filter)"
     return True
 
 
@@ -308,15 +372,23 @@ def instrument(client: Any, *, methods: dict | None = None) -> Any:
     recognise is proxied straight through, so an unfamiliar or newer SDK surface keeps
     working -- untraced rather than broken.
 
+    Which SDK the client belongs to is detected from its *shape* -- Anthropic's
+    `messages.create` or OpenAI's `chat.completions.create` / `responses.create` /
+    `embeddings.create` -- not from its class or module, so mocks and OpenAI-compatible
+    servers (LiteLLM proxy, vLLM, Together) are recognised identically. LiteLLM's
+    *module-level* functions (`litellm.completion(...)`) have no client object to wrap;
+    for those, call `record_usage(usage_from_response(response))` inside a traced
+    function -- the response shape is OpenAI's, which `usage_from_response` reads.
+
     Idempotent: instrumenting an already-instrumented client returns it unchanged. The
     naive alternative stacked two wrappers, which recorded **two nodes and double the
     tokens for every single call** -- and wrapping twice is easy to do by accident, once
     in a shared helper and once at the call site.
 
-    If *none* of the traced method paths exist on the client -- an OpenAI client handed
-    to the Anthropic map, say -- a warning is logged once. The alternative was a silent
-    no-op, where every call passes through untraced while the caller believes tracing is
-    on; a library built to expose silent failures does not get to fail silently itself.
+    If *no* traced method path exists on the client, a warning is logged once. The
+    alternative was a silent no-op, where every call passes through untraced while the
+    caller believes tracing is on; a library built to expose silent failures does not
+    get to fail silently itself.
 
     Args:
         client: The provider client to wrap.
@@ -325,7 +397,17 @@ def instrument(client: Any, *, methods: dict | None = None) -> Any:
     if isinstance(client, _Proxy):
         return client
 
-    table = methods if methods is not None else _ANTHROPIC_METHODS
+    table = methods
+    if table is None:
+        for candidate in _METHOD_MAPS:
+            try:
+                if _any_path_resolves(client, candidate):
+                    table = candidate
+                    break
+            except Exception:  # shape-sniffing must never break the wrap
+                continue
+        if table is None:
+            table = _ANTHROPIC_METHODS  # defined behaviour even when nothing matched
     try:
         if not _any_path_resolves(client, table):
             logger.warning(

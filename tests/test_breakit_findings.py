@@ -187,10 +187,19 @@ def test_a_secret_in_a_traceback_is_redacted(buffer):
             assert secret not in record.error.traceback
 
 
+try:
+    _StrEnum = enum.StrEnum
+except AttributeError:  # Python 3.10: StrEnum arrived in 3.11. Same class, spelled out --
+    # this is exactly how CPython defines it, so the str-subclass path under test is
+    # identical rather than skipped on the oldest supported version.
+    class _StrEnum(str, enum.Enum):  # type: ignore[no-redef]
+        __str__ = str.__str__
+
+
 def test_a_string_enum_is_captured(buffer):
     # api-abuse #3: str subclasses returned None from as_text, so a hallucination inside
     # a StrEnum-typed value was invisible.
-    class Model(enum.StrEnum):
+    class Model(_StrEnum):
         OPUS = "claude-opus"
 
     @webR_node(name="agent")

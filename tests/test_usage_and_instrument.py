@@ -317,6 +317,135 @@ def test_value_detectors_do_not_run_when_there_is_text(buffer):
     assert "all_zeros" not in (by_name(buffer, "agent").signals or {})
 
 
+# --- OpenAI-shaped clients (0.3.0) ---------------------------------------------------
+#
+# Shaped after the real SDK: `usage.prompt_tokens` / `completion_tokens` with
+# `prompt_tokens_details.cached_tokens`, `choices[0].finish_reason`, and the Responses
+# API's `input_tokens`/`status`/`incomplete_details`. Nothing imports `openai`.
+
+
+class FakeOpenAIUsage:
+    def __init__(self, prompt=90, completion=30, cached=0):
+        self.prompt_tokens = prompt
+        self.completion_tokens = completion
+        self.prompt_tokens_details = type("D", (), {"cached_tokens": cached})()
+
+
+class FakeChoice:
+    def __init__(self, finish_reason="stop"):
+        self.finish_reason = finish_reason
+        self.message = type("M", (), {"content": "hello"})()
+
+
+class FakeChatCompletion:
+    def __init__(self, finish_reason="stop", usage=None, model="gpt-4o"):
+        self.choices = [FakeChoice(finish_reason)]
+        self.usage = usage if usage is not None else FakeOpenAIUsage()
+        self.model = model
+
+
+class FakeCompletions:
+    def __init__(self, response=None):
+        self._response = response or FakeChatCompletion()
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._response
+
+
+class FakeOpenAIClient:
+    def __init__(self, response=None):
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = FakeCompletions(response)
+
+
+def test_an_openai_shaped_client_is_auto_detected(buffer):
+    client = webrtrace.instrument(FakeOpenAIClient())
+    client.chat.completions.create(model="gpt-4o", messages=[])
+
+    record = by_name(buffer, "openai.chat.completions.create")
+    assert record.usage.model == "gpt-4o"
+    assert record.usage.input_tokens == 90  # prompt_tokens, mapped
+    assert record.usage.output_tokens == 30  # completion_tokens, mapped
+    assert record.usage.stop_reason == "stop"
+
+
+def test_openai_cached_tokens_map_to_cache_read(buffer):
+    response = FakeChatCompletion(usage=FakeOpenAIUsage(prompt=100, completion=10, cached=80))
+    client = webrtrace.instrument(FakeOpenAIClient(response))
+    client.chat.completions.create()
+    assert by_name(buffer, "openai.chat.completions.create").usage.cache_read_input_tokens == 80
+
+
+def test_openai_length_truncation_is_suspect(buffer):
+    client = webrtrace.instrument(FakeOpenAIClient(FakeChatCompletion(finish_reason="length")))
+    client.chat.completions.create()
+    record = by_name(buffer, "openai.chat.completions.create")
+    assert record.status is NodeStatus.SUSPECT
+    assert "truncated" in record.signals["suspect"]
+
+
+def test_openai_content_filter_is_suspect(buffer):
+    client = webrtrace.instrument(
+        FakeOpenAIClient(FakeChatCompletion(finish_reason="content_filter"))
+    )
+    client.chat.completions.create()
+    assert "content_filter" in by_name(buffer, "openai.chat.completions.create").signals["suspect"]
+
+
+def test_responses_api_incomplete_is_suspect(buffer):
+    class FakeResponsesUsage:
+        input_tokens = 200
+        output_tokens = 4096
+        input_tokens_details = type("D", (), {"cached_tokens": 0})()
+
+    class FakeResponse:
+        model = "gpt-4o"
+        usage = FakeResponsesUsage()
+        status = "incomplete"
+        incomplete_details = type("D", (), {"reason": "max_output_tokens"})()
+
+    class Responses:
+        def create(self, **kwargs):
+            return FakeResponse()
+
+    class Client:
+        responses = Responses()
+
+    traced = webrtrace.instrument(Client())
+    traced.responses.create()
+    record = by_name(buffer, "openai.responses.create")
+    assert record.status is NodeStatus.SUSPECT
+    assert record.usage.input_tokens == 200
+    assert record.usage.stop_reason == "max_output_tokens"
+
+
+def test_an_anthropic_client_is_still_preferred_when_both_shapes_exist(buffer):
+    # A client exposing messages.create is Anthropic-shaped; detection order matters
+    # only when a hybrid exposes both, and then the first match wins deterministically.
+    client = webrtrace.instrument(FakeClient())
+    client.messages.create()
+    assert by_name(buffer, "anthropic.messages.create") is not None
+
+
+def test_the_litellm_pattern_works_without_a_client(buffer):
+    # LiteLLM is module-level functions -- nothing to wrap. The documented pattern is
+    # usage_from_response inside a traced call, reading the OpenAI shape it mimics.
+    from webrtrace import usage_from_response
+
+    @webR_node(name="llm")
+    def call_model():
+        response = FakeChatCompletion()  # what litellm.completion() returns, shape-wise
+        webrtrace.record_usage(usage_from_response(response))
+        return response.choices[0].message.content
+
+    call_model()
+    usage = by_name(buffer, "llm").usage
+    assert usage.input_tokens == 90
+    assert usage.model == "gpt-4o"
+
+
 # --- second-review hardening (0.2.1) ------------------------------------------------
 
 
@@ -374,19 +503,14 @@ def test_usage_merge_keeps_absent_fields_absent():
 def test_instrumenting_an_unsupported_client_warns(buffer, caplog):
     # A silent no-op meant a user believed tracing was on while every call passed
     # through untraced. A library built to expose silent failures does not get to fail
-    # silently itself.
-    class ChatCompletions:
-        def create(self, **kwargs):
+    # silently itself. (An OpenAI shape used to be the example here -- then it became
+    # a supported shape, which is the point of the adapter.)
+    class CohereIsh:
+        def generate(self, **kwargs):
             return "resp"
 
-    class Chat:
-        completions = ChatCompletions()
-
-    class OpenAIish:
-        chat = Chat()
-
     with caplog.at_level(logging.WARNING, logger="webrtrace"):
-        webrtrace.instrument(OpenAIish())
+        webrtrace.instrument(CohereIsh())
     assert any("untraced" in r.message for r in caplog.records)
 
 

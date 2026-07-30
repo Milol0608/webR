@@ -79,7 +79,7 @@ from .runtime import (
 )
 from .writer import JsonlWriter
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 __all__ = [
     "DEFAULT_CAPACITY",

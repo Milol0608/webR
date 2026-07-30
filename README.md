@@ -11,6 +11,8 @@
 pip install webrtrace
 ```
 
+![A run with zero exceptions and a wrong answer, and webR naming the nodes that caused it](docs/assets/demo.gif)
+
 **New here?** See it catch a real silent failure before you integrate anything — no API key,
 no setup:
 
@@ -230,18 +232,33 @@ marked — the failure is invisible to your program, but not to the web.
 ## Tokens, without decorating every call site
 
 ```python
-from anthropic import Anthropic
 import webrtrace
 
-client = webrtrace.instrument(Anthropic())
+client = webrtrace.instrument(Anthropic())   # or instrument(OpenAI())
 client.messages.create(model="claude-opus-4-8", messages=[...])
 ```
 
 Every provider call becomes a node carrying `model`, `input_tokens`, `output_tokens`, the
-two cache counters, and `stop_reason`. Cache tokens stay separate from ordinary input
-because they are priced differently. Async clients and `messages.stream()` are handled;
-the streaming node stays open across the whole `with` block, since usage only arrives once
-the stream finishes.
+cache counters, and `stop_reason`. **Anthropic and OpenAI clients are both recognised** —
+detected from the client's *shape* (`messages.create` vs `chat.completions.create` /
+`responses.create` / `embeddings.create`), not its class, so mocks and OpenAI-compatible
+servers (LiteLLM proxy, vLLM, Together) work identically. Both usage dialects are read:
+`prompt_tokens`/`completion_tokens` and `cached_tokens` map onto the same `Usage` fields,
+so a mixed Anthropic + OpenAI pipeline sums cleanly. Cache tokens stay separate from
+ordinary input because they are priced differently. Async clients and Anthropic's
+`messages.stream()` are handled; the streaming node stays open across the whole `with`
+block, since usage only arrives once the stream finishes.
+
+LiteLLM's module-level functions have no client object to wrap; use the response, which
+mimics OpenAI's shape:
+
+```python
+@webR_node
+def call_model(prompt: str) -> str:
+    response = litellm.completion(model="gpt-4o", messages=[...])
+    webrtrace.record_usage(webrtrace.usage_from_response(response))
+    return response.choices[0].message.content
+```
 
 This is a **wrapper, not an import hook.** Patching the SDK in place would be genuinely
 zero-touch, and it is what comparable tools do, but mutating a third-party module at
@@ -252,7 +269,9 @@ imports the provider SDK — webR still has zero runtime dependencies.
 
 The reason this matters beyond accounting: **a `refusal` is a successful call.** HTTP 200,
 `stop_reason: "refusal"`, empty content, nothing raised, and you were billed. It is
-recorded as `suspect`, as is a response truncated at `max_tokens`.
+recorded as `suspect` — as is a response truncated at `max_tokens` or `length`, and an
+OpenAI `content_filter` result, where the output was removed after generation and billed
+anyway.
 
 webR reports **tokens, not dollars.** Prices change and vary by contract; a library that
 hardcodes them is wrong the week after it ships. Multiply by your own rates.

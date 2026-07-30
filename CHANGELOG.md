@@ -3,6 +3,25 @@
 Notable changes to webR. This project follows [Semantic Versioning](https://semver.org/);
 while the major version is `0`, the public API may change between minor releases.
 
+## [0.3.0] — 2026-07-25
+
+### Added
+
+- **OpenAI support in `instrument()`.** The SDK is detected from the client's *shape*
+  (`chat.completions.create`, `responses.create`, `embeddings.create`) rather than its
+  class, so mocks and OpenAI-compatible servers (LiteLLM proxy, vLLM, Together) are
+  recognised the same way the real SDK is. Both usage dialects land in the same `Usage`
+  fields — `prompt_tokens`/`completion_tokens` and `cached_tokens` map onto
+  `input_tokens`/`output_tokens`/`cache_read_input_tokens` — so a mixed Anthropic +
+  OpenAI pipeline aggregates cleanly. Still zero imports of any provider SDK.
+- **OpenAI failure shapes marked suspect**: `finish_reason: "length"` (truncated),
+  `"content_filter"` (output removed after generation, billed anyway), and the Responses
+  API's `status: "incomplete"` with its reason.
+- **LiteLLM pattern documented**: module-level `litellm.completion()` has no client
+  object to wrap; `record_usage(usage_from_response(response))` inside a traced call
+  covers it, because LiteLLM mimics the OpenAI response shape that
+  `usage_from_response` now reads.
+
 ## [0.2.1] — 2026-07-23
 
 Integrity fixes from a second adversarial review, run against the published 0.2.0. All
